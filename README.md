@@ -1,8 +1,70 @@
-# repodrop
+# RepoDrop
 
-A Discord bot that watches public GitHub repositories and announces new releases, tags, and commits in subscribed channels. See [DESIGN.md](DESIGN.md) for the full design.
+A Discord bot that watches public GitHub repositories and announces new releases, tags, and commits in your server's channels.
 
-## Setup
+## Add RepoDrop to your server
+
+**[Invite RepoDrop](https://discord.com/oauth2/authorize?client_id=1552550763207856128&scope=bot+applications.commands&permissions=19456)**
+
+You need the **Manage Server** permission in a server to add a bot to it. RepoDrop asks only for what it needs to post announcements:
+
+| Permission | Why |
+|---|---|
+| View Channel | See the channels you subscribe |
+| Send Messages | Post announcements |
+| Embed Links | Show announcements as rich embeds with buttons |
+
+It can't read your messages. It uses slash commands only, with no message-content access.
+
+## Getting started
+
+1. In the channel where announcements should appear, run:
+   ```
+   /repodrop subscribe repo:owner/name
+   ```
+   `repo` also accepts a GitHub URL. You get releases by default; add `tags:true` or `commits:true` for more.
+2. RepoDrop records the repo's current state, so nothing old is re-announced. New releases are posted from now on, usually within 5–10 minutes (up to about an hour for very quiet repos).
+3. Check your setup with `/repodrop list`, and preview how an announcement looks with `/repodrop test repo:owner/name`.
+
+A few more examples:
+
+```
+/repodrop subscribe repo:owner/name commits:true branches:main,dev
+/repodrop subscribe repo:owner/name tags:false          # change an existing subscription
+/repodrop latest repo:owner/name                        # look up a release without subscribing
+```
+
+Server managers can open `/repodrop settings` to choose a manager role, limit subscribing to a role, set a default channel, switch to a compact announcement style, and control who can use `/repodrop latest`.
+
+## Commands
+
+All under `/repodrop`, with replies only you can see. Everyone can see the commands; access is checked when you use one:
+
+- A **manager** has Manage Server, or the server's manager role if one is set.
+- **Subscribing** is open to everyone unless the server sets a subscriber role (managers always can).
+- A subscription can be changed or removed by the member who added it, or a manager.
+
+| Command | What it does |
+|---|---|
+| `/repodrop subscribe repo [channel] [releases] [tags] [commits] [branches] [prereleases]` | Start announcing a repo (releases by default). Running it again for the same repo and channel updates it, changing only the options you pass: `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` sets the commit branches, `branches:default` follows the default branch. You need to be able to post in the target channel yourself (managers excepted). |
+| `/repodrop unsubscribe repo [channel]` | Stop announcing a repo in a channel. Your own subscriptions, or any as a manager. |
+| `/repodrop list [channel]` | Show this server's subscriptions. |
+| `/repodrop status [channel]` | Health report: what each subscription posts, when it last posted and was checked, and any problems (missing permissions, deleted branches, disabled subscriptions). Managers only. |
+| `/repodrop latest repo [public]` | Show a repo's newest release (or newest tag) with its buttons, no subscription needed. Only you see it unless you pass `public:true`. Servers can limit it to managers or turn off public posts. |
+| `/repodrop settings` | Settings panel: manager role, subscriber role, default channel, embed style, and who can use `/repodrop latest`. Changes save immediately. Managers only; changing the manager role needs Manage Server. |
+| `/repodrop test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. |
+
+Announcements carry link buttons: **View release** / **View tag** / **View commits**, plus **Compare** against the previous version. Servers can choose a compact style (no release notes).
+
+When a subscription is disabled automatically (the channel was deleted, the bot lost permission, or the repo was deleted or made private), or a followed branch is deleted, the bot posts one notice in the server's system channel if it can.
+
+### Limits
+
+Each server can follow up to **25 repos** across up to **100 subscriptions** (a subscription is one repo in one channel), and a commit subscription can follow up to **5 branches**. Only public repositories are supported.
+
+---
+
+## Running your own instance
 
 Requires [uv](https://docs.astral.sh/uv/) and PostgreSQL. Create a role and database for the bot first:
 
@@ -18,32 +80,11 @@ uv run alembic upgrade head  # create the schema
 uv run repodrop              # start the bot, poller, and announcer
 ```
 
-- **Discord token:** create an application at <https://discord.com/developers/applications>. No privileged intents are needed. Invite it with the `bot` and `applications.commands` scopes and the View Channel, Send Messages, and Embed Links permissions.
+- **Discord token:** create an application at <https://discord.com/developers/applications>. No privileged intents are needed. Invite it with the `bot` and `applications.commands` scopes and the View Channel, Send Messages, and Embed Links permissions (`permissions=19456`).
 - **GitHub token:** a fine-grained token with no extra permissions works (public repo read access only). It raises the rate limit from 60 to 5,000 requests/hour.
 - Set `DEV_GUILD_ID` to your own private server and `OWNER_IDS` to your Discord user ID: the `/repodrop-owner` commands are registered only there and only run for you. `/repodrop` is registered globally; set `DEV_SYNC=true` while developing to register it only in `DEV_GUILD_ID`, where changes show up instantly.
 
-## Commands
-
-All under `/repodrop`, with ephemeral replies. The group is visible to everyone; access is checked per command:
-
-- A **manager** has Manage Server, or the server's manager role if one is set.
-- **Subscribing** is open to everyone unless the server sets a subscriber role (managers always can).
-- A subscription can be changed or removed by the member who added it, or a manager.
-
-
-| Command | What it does |
-|---|---|
-| `/repodrop subscribe repo [channel] [releases] [tags] [commits] [branches] [prereleases]` | Start announcing a repo (releases by default). Running it again for the same repo and channel updates it, changing only the options you pass: `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` sets the commit branches, `branches:default` follows the default branch. You need to be able to post in the target channel yourself (managers excepted). |
-| `/repodrop unsubscribe repo [channel]` | Stop announcing a repo in a channel. Your own subscriptions, or any as a manager. |
-| `/repodrop list [channel]` | Show this server's subscriptions. |
-| `/repodrop status [channel]` | Health report: what each subscription posts, when it last posted and was checked, and any problems (missing permissions, deleted branches, disabled subscriptions). Managers only. |
-| `/repodrop latest repo [public]` | Show a repo's newest release (or newest tag) with its buttons, no subscription needed. Only you see it unless you pass `public:true`. Servers can limit it to managers or turn off public posts. |
-| `/repodrop settings` | Settings panel: manager role, subscriber role, default channel, embed style, and who can use `/repodrop latest`. Changes save immediately. Managers only; changing the manager role needs Manage Server. |
-| `/repodrop test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. |
-
-Announcements carry link buttons: **View release** / **View tag** / **View commits**, plus **Compare** against the previous version. Servers can choose a compact style (no release notes).
-
-When a subscription is disabled automatically (the channel was deleted, the bot lost permission, or the repo was deleted or made private), or a followed branch is deleted, the bot posts one notice in the server's system channel if it can.
+See [DESIGN.md](DESIGN.md) for the full design.
 
 ### Operator commands
 
