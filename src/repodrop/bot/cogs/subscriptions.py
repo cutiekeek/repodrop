@@ -30,6 +30,7 @@ from repodrop.github.client import GitHubError, NotFoundError, RateLimitedError
 from repodrop.github.names import parse_repo
 from repodrop.github.schemas import Release, Repository
 from repodrop.guild_settings import EffectiveSettings, cap_violation, usage_line
+from repodrop.observability import audit
 from repodrop.poller.detectors import (
     RepoRef,
     previous_release_tag,
@@ -209,6 +210,19 @@ class SubscriptionsCog(
                 await queries.prune_orphans(session)
             usage = await queries.guild_usage(session, interaction.guild.id)
 
+        audit(
+            ("subscribed" if created else "updated subscription for") + " {channel_id} to {repo}",
+            guild_id=interaction.guild.id,
+            channel_id=target.id,
+            user_id=member.id,
+            repo=gh_repo.full_name,
+            subscription_id=sub.id,
+            kinds=new.sorted_kinds,
+            branches=list(new.branches),
+            prereleases=new.include_prereleases,
+            reactivated=reactivated,
+            changes=[] if old is None else describe_changes(old, new),
+        )
         latest_release = await self._baseline(keys, gh_repo)
 
         repo_link = f"**[{gh_repo.full_name}](<{gh_repo.html_url}>)**"
@@ -310,6 +324,15 @@ class SubscriptionsCog(
                 )
             await queries.delete_subscription(session, sub.id)
             await queries.prune_orphans(session)
+        audit(
+            "unsubscribed {channel_id} from {repo}",
+            guild_id=interaction.guild.id,
+            channel_id=target.id,
+            user_id=interaction.user.id,
+            repo=full_name,
+            subscription_id=sub.id,
+            created_by=sub.created_by,
+        )
         await interaction.response.send_message(
             f"Unsubscribed {target.mention} from **{full_name}**.", ephemeral=True
         )
@@ -517,6 +540,13 @@ class SubscriptionsCog(
             )
         except discord.Forbidden as exc:
             raise UserError(f"I couldn't post in {target.mention}: {exc.text}") from exc
+        audit(
+            "posted a test announcement for {repo} in {channel_id}",
+            guild_id=target.guild.id,
+            channel_id=target.id,
+            user_id=interaction.user.id,
+            repo=gh_repo.full_name,
+        )
         await interaction.followup.send(
             f"Posted a test announcement in {target.mention}.", ephemeral=True
         )

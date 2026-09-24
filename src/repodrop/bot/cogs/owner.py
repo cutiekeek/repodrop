@@ -8,7 +8,6 @@ OWNER_IDS, so even another admin of that server can't run them.
 from typing import TYPE_CHECKING
 
 import discord
-import logfire
 from discord import app_commands
 from discord.ext import commands
 from sqlalchemy import func
@@ -18,6 +17,7 @@ from repodrop.bot.checks import AccessDenied, is_owner
 from repodrop.bot.errors import UserError, reply_with_error
 from repodrop.db import queries
 from repodrop.guild_settings import EffectiveSettings, usage_line
+from repodrop.observability import audit
 
 if TYPE_CHECKING:
     from repodrop.bot.client import RepoDropBot
@@ -82,6 +82,14 @@ class OwnerCog(
             if not values:
                 raise UserError("Pass `max_repos`, `max_subscriptions`, or `reset:true`.")
         settings = await self.bot.guild_settings.update(gid, **values)
+        audit(
+            "operator changed caps for guild {guild_id}",
+            guild_id=gid,
+            user_id=interaction.user.id,
+            max_repos=settings.max_repos,
+            max_subscriptions=settings.max_subscriptions,
+            reset=reset,
+        )
         # Lowering a cap below current usage deletes nothing; it only blocks new subscriptions.
         await self._reply(interaction, gid, f"Caps updated. {await self._usage(settings)}")
 
@@ -92,6 +100,12 @@ class OwnerCog(
     async def commits(self, interaction: discord.Interaction, guild_id: str, allowed: bool) -> None:
         gid = parse_guild_id(guild_id)
         await self.bot.guild_settings.update(gid, commits_allowed=allowed)
+        audit(
+            "operator {action} commits for guild {guild_id}",
+            action="allowed" if allowed else "disallowed",
+            guild_id=gid,
+            user_id=interaction.user.id,
+        )
         note = (
             "Commit announcements are allowed."
             if allowed
@@ -117,7 +131,14 @@ class OwnerCog(
         )
         async with self.bot.sessions.begin() as session:
             skipped = await queries.skip_guild_pending_deliveries(session, gid, "server blocked")
-        logfire.warn("blocked guild {guild_id}: {reason}", guild_id=gid, reason=reason)
+        audit(
+            "operator blocked guild {guild_id}: {reason}",
+            level="warn",
+            guild_id=gid,
+            user_id=interaction.user.id,
+            reason=reason,
+            skipped_deliveries=skipped,
+        )
         await self._reply(
             interaction,
             gid,
@@ -133,7 +154,7 @@ class OwnerCog(
         await self.bot.guild_settings.update(
             gid, blocked=False, blocked_reason=None, blocked_at=None
         )
-        logfire.info("unblocked guild {guild_id}", guild_id=gid)
+        audit("operator unblocked guild {guild_id}", guild_id=gid, user_id=interaction.user.id)
         await self._reply(interaction, gid, "Unblocked. New announcements resume from now on.")
 
     # ------------------------------------------------------------------ inspect

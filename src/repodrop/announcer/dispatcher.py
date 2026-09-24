@@ -158,24 +158,45 @@ class Dispatcher:
                 await queries.deactivate_subscription(session, d.subscription_id, disable_reason)
         if disable_reason:
             logfire.warn(
-                "deactivated subscription {subscription_id}: {reason}",
+                "disabled subscription {subscription_id}: {reason}",
                 subscription_id=d.subscription_id,
-                reason=error,
+                guild_id=d.guild_id,
+                channel_id=d.channel_id,
+                reason=disable_reason,
+                error=error,
             )
 
     async def _fail(self, d: ClaimedDelivery, error: str) -> None:
         async with self._sessions.begin() as session:
             await queries.mark_delivery_failed(session, d.id, error)
+        logfire.warn(
+            "delivery {delivery_id} failed permanently after {attempts} attempts: {error}",
+            delivery_id=d.id,
+            attempts=d.attempts,
+            error=error,
+            subscription_id=d.subscription_id,
+            guild_id=d.guild_id,
+            channel_id=d.channel_id,
+            event_kind=d.event_kind,
+        )
 
     async def _retry_or_fail(self, d: ClaimedDelivery, error: str, *, reason: str) -> None:
         observability.delivery_failures.add(1, {"reason": reason})
         if d.attempts >= self._settings.delivery_max_attempts:
             await self._fail(d, error)
             return
+        delay = retry_delay(d.attempts)
         async with self._sessions.begin() as session:
-            await queries.schedule_delivery_retry(
-                session, d.id, error=error, delay=retry_delay(d.attempts)
-            )
+            await queries.schedule_delivery_retry(session, d.id, error=error, delay=delay)
+        logfire.info(
+            "delivery {delivery_id} will retry in {delay_seconds}s: {error}",
+            delivery_id=d.id,
+            delay_seconds=int(delay.total_seconds()),
+            attempt=d.attempts,
+            error=error,
+            guild_id=d.guild_id,
+            channel_id=d.channel_id,
+        )
 
     # ------------------------------------------------------------------ admin notices
 
@@ -211,7 +232,13 @@ class Dispatcher:
             )
 
         for guild_id, guild_lines in lines.items():
-            await self._post_notice(guild_id, guild_lines)
+            posted = await self._post_notice(guild_id, guild_lines)
+            logfire.info(
+                "admin notice for guild {guild_id}: {outcome}",
+                guild_id=guild_id,
+                outcome="posted" if posted else "no usable system channel",
+                items=len(guild_lines),
+            )
 
         async with self._sessions.begin() as session:
             await queries.mark_subscriptions_notified(

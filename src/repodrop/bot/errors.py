@@ -14,16 +14,31 @@ class UserError(Exception):
 async def reply_with_error(
     interaction: discord.Interaction, error: app_commands.AppCommandError
 ) -> None:
-    """Explain expected failures to the user; log anything unexpected."""
+    """Explain expected refusals to the user and log them; log anything unexpected as an error."""
     original = getattr(error, "original", error)
-    if isinstance(original, UserError | AccessDenied):
-        message = str(original)
-    elif isinstance(original, app_commands.CommandOnCooldown):
-        message = f"Slow down a little. Try again in {original.retry_after:.0f} seconds."
+    command = getattr(interaction.command, "qualified_name", None)
+    if isinstance(original, UserError | AccessDenied | app_commands.CommandOnCooldown):
+        if isinstance(original, app_commands.CommandOnCooldown):
+            message = f"Slow down a little. Try again in {original.retry_after:.0f} seconds."
+        else:
+            message = str(original)
+        # No access, cooldown, or bad input: useful context when someone asks for help.
+        logfire.info(
+            "/{command} refused for {user_id}: {reason}",
+            command=command,
+            user_id=interaction.user.id,
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
+            refusal=type(original).__name__,
+            reason=message,
+        )
     else:
         logfire.exception(
-            "command {command} failed",
-            command=getattr(interaction.command, "qualified_name", None),
+            "/{command} failed for {user_id}",
+            command=command,
+            user_id=interaction.user.id,
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
             _exc_info=original,
         )
         message = "Something went wrong on my end. Please try again."

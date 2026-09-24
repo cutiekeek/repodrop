@@ -2,6 +2,7 @@ import asyncio
 
 import discord
 import logfire
+from discord import app_commands
 from discord.ext import commands
 
 from repodrop.announcer.dispatcher import Dispatcher
@@ -12,6 +13,7 @@ from repodrop.db import queries
 from repodrop.db.session import create_engine, create_session_factory
 from repodrop.github.client import GitHubClient
 from repodrop.guild_settings import GuildSettingsCache
+from repodrop.observability import audit, option_values
 from repodrop.poller.scheduler import Poller
 
 
@@ -38,6 +40,7 @@ class RepoDropBot(commands.Bot):
         self._background: list[asyncio.Task[None]] = []
 
     async def setup_hook(self) -> None:
+        self._log_config()
         await self.add_cog(SubscriptionsCog(self))
         if self.settings.dev_guild_id:
             # Operator commands exist only in the operator's own server.
@@ -85,6 +88,49 @@ class RepoDropBot(commands.Bot):
             "synced {count} commands in guild {guild_id}", count=len(synced), guild_id=dev_guild.id
         )
 
+    def _log_config(self) -> None:
+        """What this process is running with (never secrets), for reading logs later."""
+        s = self.settings
+        logfire.info(
+            "starting repodrop in {environment}",
+            environment=s.environment,
+            dev_guild_id=s.dev_guild_id,
+            dev_sync=s.dev_sync,
+            owner_count=len(s.owner_ids),
+            max_repos_per_guild=s.max_repos_per_guild,
+            max_subs_per_guild=s.max_subs_per_guild,
+            max_branches_per_sub=s.max_branches_per_sub,
+            poll_min_seconds=s.poll_min_interval.total_seconds(),
+            poll_max_seconds=s.poll_max_interval.total_seconds(),
+            poll_concurrency=s.poll_concurrency,
+        )
+
+    async def on_app_command_completion(
+        self,
+        interaction: discord.Interaction,
+        command: app_commands.Command | app_commands.ContextMenu,
+    ) -> None:
+        """One log line per successful command: who ran what, where, with which options."""
+        logfire.info(
+            "/{command} by {user_id} in {guild_id}",
+            command=command.qualified_name,
+            user_id=interaction.user.id,
+            guild_id=interaction.guild_id,
+            channel_id=interaction.channel_id,
+            options=option_values(interaction.namespace),
+        )
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        settings = await self.guild_settings.get(guild.id)
+        audit(
+            "joined guild {guild_id} ({guild_name})",
+            level="warn" if settings.blocked else "info",
+            guild_id=guild.id,
+            guild_name=guild.name,
+            member_count=guild.member_count,
+            blocked=settings.blocked,
+        )
+
     async def on_ready(self) -> None:
         logfire.info(
             "logged in as {user} in {guilds} guilds", user=str(self.user), guilds=len(self.guilds)
@@ -97,13 +143,15 @@ class RepoDropBot(commands.Bot):
                 await queries.delete_guild_settings_unless_blocked(session, guild.id)
                 await queries.prune_orphans(session)
             self.guild_settings.invalidate(guild.id)
-            logfire.info(
-                "removed from guild {guild_id}; deleted {count} subscriptions",
+            audit(
+                "removed from guild {guild_id} ({guild_name}); deleted {count} subscriptions",
                 guild_id=guild.id,
+                guild_name=guild.name,
                 count=deleted,
             )
 
     async def close(self) -> None:
+        logfire.info("shutting down")
         for task in self._background:
             task.cancel()
         await asyncio.gather(*self._background, return_exceptions=True)

@@ -11,6 +11,7 @@ import discord
 from repodrop.bot.checks import is_manager
 from repodrop.db.models import EmbedStyle, LatestAccess
 from repodrop.guild_settings import EffectiveSettings
+from repodrop.observability import audit
 
 PANEL_TIMEOUT = 300
 REQUIRED_CHANNEL_PERMISSIONS = ("view_channel", "send_messages", "embed_links")
@@ -241,6 +242,12 @@ class SettingsPanel(discord.ui.View):
             )
             return
         self.settings = await self.store.update(self.settings.guild_id, **values)
+        audit(
+            "changed server settings in {guild_id}",
+            guild_id=self.settings.guild_id,
+            user_id=member.id,
+            changes={k: str(v) if v is not None else None for k, v in values.items()},
+        )
         await self._render(interaction)
 
     async def _render(self, interaction: discord.Interaction, notice: str | None = None) -> None:

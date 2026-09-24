@@ -134,6 +134,12 @@ class Poller:
                 result = await self._fetch(key, repo.full_name, watch.etag)
             except RateLimitedError as exc:
                 span.set_attribute("result", "rate_limited")
+                logfire.warn(
+                    "rate limited by GitHub until {retry_at} while polling {repo}",
+                    retry_at=exc.retry_at.isoformat(),
+                    repo=repo.full_name,
+                    kind=key.kind,
+                )
                 await self._reschedule(key, exc.retry_at, error="rate limited by GitHub")
                 return 0
             except NotFoundError:
@@ -194,6 +200,16 @@ class Poller:
                     next_poll_at=self._at(interval),
                 )
             span.set_attributes({"events": len(detection.events), "deliveries": new_deliveries})
+            if detection.events:
+                logfire.info(
+                    "detected {count} new {kind} event(s) for {repo}",
+                    count=len(detection.events),
+                    kind=key.kind,
+                    repo=repo.full_name,
+                    branch=key.branch or None,
+                    external_ids=[e.external_id for e in detection.events],
+                    deliveries=new_deliveries,
+                )
             return new_deliveries
 
     # ------------------------------------------------------------------ baselining
