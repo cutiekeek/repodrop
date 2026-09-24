@@ -105,12 +105,12 @@ def cap_violation(
     if usage.subscriptions >= settings.max_subscriptions:
         return (
             f"This server has reached its limit of {settings.max_subscriptions} subscriptions. "
-            "Remove one with `/github unsubscribe` first."
+            "Remove one with `/repodrop unsubscribe` first."
         )
     if not repo_already_followed and usage.repos >= settings.max_repos:
         return (
             f"This server already follows {usage.repos} repos (limit {settings.max_repos}). "
-            "Unsubscribe from one with `/github unsubscribe` first."
+            "Unsubscribe from one with `/repodrop unsubscribe` first."
         )
     return None
 

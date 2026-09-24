@@ -1,6 +1,6 @@
 """Embed and link-button builders per event kind. Input is the `events.payload` JSON.
 
-Shared by announcements, `/github test` and `/github latest`, so they all look the same.
+Shared by announcements, `/repodrop test` and `/repodrop latest`, so they all look the same.
 Payloads stored before a field existed (e.g. `previous_tag`) still render; the matching
 button is just left out.
 """

@@ -1,4 +1,4 @@
-"""Phase 5: /owner commands, the /github settings panel, and command registration."""
+"""Phase 5: /repodrop-owner commands, the /repodrop settings panel, and command registration."""
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -50,7 +50,7 @@ def fake_interaction(user_id=OWNER, **user):
     )
 
 
-# --------------------------------------------------------------------------- /owner
+# --------------------------------------------------------------------------- /repodrop-owner
 
 
 def test_parse_guild_id():
@@ -281,15 +281,22 @@ async def close(bot):
 async def test_owner_commands_only_in_dev_guild_and_github_global():
     bot = await make_bot(dev_guild_id=GUILD)
     try:
-        assert [c.name for c in bot.tree.get_commands()] == ["github"]
-        assert [c.name for c in bot.tree.get_commands(guild=discord.Object(GUILD))] == ["owner"]
+        assert [c.name for c in bot.tree.get_commands()] == ["repodrop"]
+        assert [c.name for c in bot.tree.get_commands(guild=discord.Object(GUILD))] == [
+            "repodrop-owner"
+        ]
         github = bot.tree.get_commands()[0]
         assert "settings" in [c.name for c in github.commands]
+        # /repodrop is visible to everyone; /repodrop-owner only to Administrators.
+        assert github.to_dict(bot.tree).get("default_member_permissions") is None
+        [owner] = bot.tree.get_commands(guild=discord.Object(GUILD))
+        admin = discord.Permissions(administrator=True).value
+        assert int(owner.to_dict(bot.tree)["default_member_permissions"]) == admin
 
         await bot._sync_commands()
         calls = [c.kwargs.get("guild") for c in bot.tree.sync.await_args_list]
-        assert calls[0] is None  # global sync for /github
-        assert calls[1].id == GUILD  # /owner in the dev server
+        assert calls[0] is None  # global sync for /repodrop
+        assert calls[1].id == GUILD  # /repodrop-owner in the dev server
     finally:
         await close(bot)
 
@@ -301,7 +308,7 @@ async def test_dev_sync_puts_github_in_dev_guild_only():
         [call] = bot.tree.sync.await_args_list
         assert call.kwargs["guild"].id == GUILD
         names = {c.name for c in bot.tree.get_commands(guild=discord.Object(GUILD))}
-        assert names == {"github", "owner"}
+        assert names == {"repodrop", "repodrop-owner"}
     finally:
         await close(bot)
 

@@ -32,10 +32,10 @@ class Settings(DatabaseSettings):
     logfire_token: SecretStr | None = None
     environment: str = "development"
 
-    # The operator's private server: /owner commands are registered only there.
+    # The operator's private server: /repodrop-owner commands are registered only there.
     dev_guild_id: int | None = None
-    # Also register /github in DEV_GUILD_ID (instant updates while developing) instead of
-    # globally. Leave off in production so every server gets /github.
+    # Also register /repodrop in DEV_GUILD_ID (instant updates while developing) instead of
+    # globally. Leave off in production so every server gets /repodrop.
     dev_sync: bool = False
 
     # Default per-server caps; the operator can override them per server (guild_settings).

@@ -1,6 +1,6 @@
-"""What a `/github subscribe` call turns a subscription into, and what changed.
+"""What a `/repodrop subscribe` call turns a subscription into, and what changed.
 
-Pure logic, no Discord or database: `/github subscribe` both creates and updates, and on an
+Pure logic, no Discord or database: `/repodrop subscribe` both creates and updates, and on an
 update only the options actually passed change.
 """
 
@@ -89,7 +89,7 @@ def plan_subscription(
             raise PlanError("Turn on at least one of `releases`, `tags` or `commits`.")
         raise PlanError(
             "That would turn off every event type. To stop announcing this repo here, use "
-            "`/github unsubscribe`."
+            "`/repodrop unsubscribe`."
         )
 
     branches = base.branches

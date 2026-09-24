@@ -1,6 +1,6 @@
-"""Access rules for /github commands.
+"""Access rules for /repodrop commands.
 
-`/github` is visible to everyone (Discord can't gate subcommands individually), so access is
+`/repodrop` is visible to everyone (Discord can't gate subcommands individually), so access is
 enforced here:
 
 - A manager has Manage Server, or the server's manager role if one is set.

@@ -20,11 +20,11 @@ uv run repodrop              # start the bot, poller, and announcer
 
 - **Discord token:** create an application at <https://discord.com/developers/applications>. No privileged intents are needed. Invite it with the `bot` and `applications.commands` scopes and the View Channel, Send Messages, and Embed Links permissions.
 - **GitHub token:** a fine-grained token with no extra permissions works (public repo read access only). It raises the rate limit from 60 to 5,000 requests/hour.
-- Set `DEV_GUILD_ID` to your own private server and `OWNER_IDS` to your Discord user ID: the `/owner` commands are registered only there and only run for you. `/github` is registered globally; set `DEV_SYNC=true` while developing to register it only in `DEV_GUILD_ID`, where changes show up instantly.
+- Set `DEV_GUILD_ID` to your own private server and `OWNER_IDS` to your Discord user ID: the `/repodrop-owner` commands are registered only there and only run for you. `/repodrop` is registered globally; set `DEV_SYNC=true` while developing to register it only in `DEV_GUILD_ID`, where changes show up instantly.
 
 ## Commands
 
-All under `/github`, with ephemeral replies. The group is visible to everyone; access is checked per command:
+All under `/repodrop`, with ephemeral replies. The group is visible to everyone; access is checked per command:
 
 - A **manager** has Manage Server, or the server's manager role if one is set.
 - **Subscribing** is open to everyone unless the server sets a subscriber role (managers always can).
@@ -33,13 +33,13 @@ All under `/github`, with ephemeral replies. The group is visible to everyone; a
 
 | Command | What it does |
 |---|---|
-| `/github subscribe repo [channel] [releases] [tags] [commits] [branches] [prereleases]` | Start announcing a repo (releases by default). Running it again for the same repo and channel updates it, changing only the options you pass: `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` sets the commit branches, `branches:default` follows the default branch. You need to be able to post in the target channel yourself (managers excepted). |
-| `/github unsubscribe repo [channel]` | Stop announcing a repo in a channel. Your own subscriptions, or any as a manager. |
-| `/github list [channel]` | Show this server's subscriptions. |
-| `/github status [channel]` | Health report: what each subscription posts, when it last posted and was checked, and any problems (missing permissions, deleted branches, disabled subscriptions). Managers only. |
-| `/github latest repo [public]` | Show a repo's newest release (or newest tag) with its buttons, no subscription needed. Only you see it unless you pass `public:true`. Servers can limit it to managers or turn off public posts. |
-| `/github settings` | Settings panel: manager role, subscriber role, default channel, embed style, and who can use `/github latest`. Changes save immediately. Managers only; changing the manager role needs Manage Server. |
-| `/github test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. |
+| `/repodrop subscribe repo [channel] [releases] [tags] [commits] [branches] [prereleases]` | Start announcing a repo (releases by default). Running it again for the same repo and channel updates it, changing only the options you pass: `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` sets the commit branches, `branches:default` follows the default branch. You need to be able to post in the target channel yourself (managers excepted). |
+| `/repodrop unsubscribe repo [channel]` | Stop announcing a repo in a channel. Your own subscriptions, or any as a manager. |
+| `/repodrop list [channel]` | Show this server's subscriptions. |
+| `/repodrop status [channel]` | Health report: what each subscription posts, when it last posted and was checked, and any problems (missing permissions, deleted branches, disabled subscriptions). Managers only. |
+| `/repodrop latest repo [public]` | Show a repo's newest release (or newest tag) with its buttons, no subscription needed. Only you see it unless you pass `public:true`. Servers can limit it to managers or turn off public posts. |
+| `/repodrop settings` | Settings panel: manager role, subscriber role, default channel, embed style, and who can use `/repodrop latest`. Changes save immediately. Managers only; changing the manager role needs Manage Server. |
+| `/repodrop test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. |
 
 Announcements carry link buttons: **View release** / **View tag** / **View commits**, plus **Compare** against the previous version. Servers can choose a compact style (no release notes).
 
@@ -47,15 +47,15 @@ When a subscription is disabled automatically (the channel was deleted, the bot 
 
 ### Operator commands
 
-Only in `DEV_GUILD_ID`, only for `OWNER_IDS`. Server IDs are passed as text.
+Registered only in `DEV_GUILD_ID`, hidden there from members without Administrator, and only run for `OWNER_IDS`. Server IDs are passed as text.
 
 | Command | What it does |
 |---|---|
-| `/owner limits guild_id [max_repos] [max_subscriptions] [reset]` | Set a server's caps, or reset them to the defaults. Lowering a cap deletes nothing; it only blocks new subscriptions. |
-| `/owner commits guild_id allowed` | Allow or disallow commit announcements. Existing commit subscriptions are kept. |
-| `/owner block guild_id reason` | Every `/github` command in that server shows the reason; pending announcements are skipped. Survives the bot being removed and re-invited. |
-| `/owner unblock guild_id` | Lift a block; subscriptions resume as they were. |
-| `/owner inspect guild_id` | Settings, usage, and recent delivery failures. |
+| `/repodrop-owner limits guild_id [max_repos] [max_subscriptions] [reset]` | Set a server's caps, or reset them to the defaults. Lowering a cap deletes nothing; it only blocks new subscriptions. |
+| `/repodrop-owner commits guild_id allowed` | Allow or disallow commit announcements. Existing commit subscriptions are kept. |
+| `/repodrop-owner block guild_id reason` | Every `/repodrop` command in that server shows the reason; pending announcements are skipped. Survives the bot being removed and re-invited. |
+| `/repodrop-owner unblock guild_id` | Lift a block; subscriptions resume as they were. |
+| `/repodrop-owner inspect guild_id` | Settings, usage, and recent delivery failures. |
 
 ## Development
 

@@ -1,7 +1,7 @@
-"""`/github settings`: an ephemeral panel whose controls save immediately.
+"""`/repodrop settings`: an ephemeral panel whose controls save immediately.
 
-Discord allows 5 component rows per message, so the design's "who can use /github latest" and
-"allow public /github latest" controls share one select with four combined choices.
+Discord allows 5 component rows per message, so the design's "who can use /repodrop latest" and
+"allow public /repodrop latest" controls share one select with four combined choices.
 """
 
 from typing import Protocol
@@ -99,7 +99,7 @@ def panel_embed(
         inline=True,
     )
     embed.add_field(name="Embed style", value=STYLE_CHOICES[EmbedStyle(settings.embed_style)])
-    embed.add_field(name="/github latest", value=LATEST_CHOICES[latest_choice(settings)][0])
+    embed.add_field(name="/repodrop latest", value=LATEST_CHOICES[latest_choice(settings)][0])
     embed.add_field(
         name="Set by the bot operator",
         value=f"{usage_text}\nCommit announcements "
@@ -187,7 +187,7 @@ class SettingsPanel(discord.ui.View):
         latest = discord.ui.Select(
             options=[
                 discord.SelectOption(
-                    label=f"/github latest: {label}", value=value, default=value == current
+                    label=f"/repodrop latest: {label}", value=value, default=value == current
                 )
                 for value, (label, _, _) in LATEST_CHOICES.items()
             ],

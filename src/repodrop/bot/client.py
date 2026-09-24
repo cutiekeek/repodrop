@@ -43,9 +43,9 @@ class RepoDropBot(commands.Bot):
             # Operator commands exist only in the operator's own server.
             await self.add_cog(OwnerCog(self), guild=discord.Object(self.settings.dev_guild_id))
         else:
-            logfire.warn("DEV_GUILD_ID isn't set, so /owner commands aren't registered")
+            logfire.warn("DEV_GUILD_ID isn't set, so /repodrop-owner commands aren't registered")
         if not self.settings.owner_ids:
-            logfire.warn("OWNER_IDS is empty, so nobody can run /owner commands")
+            logfire.warn("OWNER_IDS is empty, so nobody can run /repodrop-owner commands")
         self._background = [
             asyncio.create_task(self.poller.run(), name="poller"),
             asyncio.create_task(self.poller.run_maintenance(), name="maintenance"),
@@ -56,9 +56,9 @@ class RepoDropBot(commands.Bot):
         await self._sync_commands()
 
     async def _sync_commands(self) -> None:
-        """Register /github globally and /owner in the operator's server.
+        """Register /repodrop globally and /repodrop-owner in the operator's server.
 
-        With DEV_SYNC, /github is registered in DEV_GUILD_ID instead of globally, for instant
+        With DEV_SYNC, /repodrop is registered in DEV_GUILD_ID instead of globally, for instant
         updates while developing.
         """
         dev_guild = (

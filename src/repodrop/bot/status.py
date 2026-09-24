@@ -1,4 +1,4 @@
-"""`/github status`: a per-subscription health report, paginated."""
+"""`/repodrop status`: a per-subscription health report, paginated."""
 
 from collections.abc import Callable
 from dataclasses import dataclass, field

@@ -1,4 +1,4 @@
-"""Phase 4: Compare data, link buttons, embed styles, and /github latest."""
+"""Phase 4: Compare data, link buttons, embed styles, and /repodrop latest."""
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
@@ -166,7 +166,7 @@ async def test_build_message_commit_has_view_commits_button():
     ]
 
 
-# --------------------------------------------------------------------------- /github latest
+# --------------------------------------------------------------------------- /repodrop latest
 
 
 def gh_repo() -> Repository:

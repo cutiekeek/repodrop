@@ -107,7 +107,7 @@ CREATE TABLE repo_watches (
     last_seen_id   TEXT,                       -- watermark: newest release's published_at, tag name, or commit SHA
     poll_interval  INTERVAL NOT NULL DEFAULT '10 minutes',
     next_poll_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    last_polled_at TIMESTAMPTZ,                -- shown by /github status
+    last_polled_at TIMESTAMPTZ,                -- shown by /repodrop status
     last_error     TEXT,                       -- e.g. repo deleted or made private
     notified_at    TIMESTAMPTZ,                -- admin notice sent for a deleted branch (§8.6)
     PRIMARY KEY (repo_id, kind, branch)
@@ -172,10 +172,10 @@ CREATE TABLE guild_settings (
     max_subscriptions   INT,                   -- NULL = MAX_SUBS_PER_GUILD
     commits_allowed     BOOLEAN NOT NULL DEFAULT true,
     blocked             BOOLEAN NOT NULL DEFAULT false,
-    blocked_reason      TEXT,                  -- shown to the server on any /github command
+    blocked_reason      TEXT,                  -- shown to the server on any /repodrop command
     blocked_at          TIMESTAMPTZ,
 
-    -- Admin-controlled (/github settings, §8.7)
+    -- Admin-controlled (/repodrop settings, §8.7)
     manager_role_id     BIGINT,                -- NULL = Manage Server only
     subscriber_role_id  BIGINT,                -- NULL = everyone can subscribe
     default_channel_id  BIGINT,                -- NULL = channel the command was run in
@@ -193,11 +193,11 @@ When a guild removes the bot, its subscriptions are deleted, and the cascades cl
 
 ### 8.1 Subscribe (create or update)
 
-`/github subscribe` both creates subscriptions and modifies existing ones. A subscription is identified by (server, channel, repo), so running the command again for the same repo and channel updates it instead of failing.
+`/repodrop subscribe` both creates subscriptions and modifies existing ones. A subscription is identified by (server, channel, repo), so running the command again for the same repo and channel updates it instead of failing.
 
 **Options:** `repo`, `channel`, `releases`, `tags` and `commits` (booleans), `branches` (comma-separated names, or `default`), and `prereleases` (boolean). Event kinds are separate booleans rather than one choice option because Discord slash options can't multi-select, and separate booleans let an update switch one kind on or off without touching the others.
 
-1. A member with subscribe access (§9) runs `/github subscribe`. If the server is blocked, the bot replies with the block notice instead (§8.8). A per-user cooldown (for example, 5 subscribes per minute) keeps anyone from filling the server's caps in one burst.
+1. A member with subscribe access (§9) runs `/repodrop subscribe`. If the server is blocked, the bot replies with the block notice instead (§8.8). A per-user cooldown (for example, 5 subscribes per minute) keeps anyone from filling the server's caps in one burst.
 2. The target channel is the `channel` option if given, otherwise the server's `default_channel_id`, otherwise the current channel. Before saving, the bot checks two sets of permissions in that channel:
    - **The bot's own:** View Channel, Send Messages and Embed Links, so the subscription can actually post.
    - **The member's:** View Channel and Send Messages. Without this, a member could use the bot to post into a channel they can't post in themselves, such as a read-only announcements channel. Managers skip this check.
@@ -223,7 +223,7 @@ When a guild removes the bot, its subscriptions are deleted, and the cascades cl
 
 - Only the subscription's creator (`created_by`) or a manager can change it. Anyone else gets a reply saying the subscription already exists and who can modify it.
 - Only the options passed are changed; omitted options keep their current values. For example, `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` replaces the branch list, and `branches:default` goes back to following the default branch.
-- An update that would leave no event kinds on is rejected, with a pointer to `/github unsubscribe`.
+- An update that would leave no event kinds on is rejected, with a pointer to `/repodrop unsubscribe`.
 - `branches` is rejected when commits would be off, rather than stored with no effect. A branch named explicitly stays that branch even if it's the current default; only `branches:default` (or an empty list) follows the default branch when it changes.
 - A disabled subscription is reactivated and its `disabled_reason` cleared.
 - Updates don't change the server's repo or subscription counts, so those caps aren't rechecked. The branch cap still applies.
@@ -255,9 +255,9 @@ When a guild removes the bot, its subscriptions are deleted, and the cascades cl
 - A commit event on branch B is delivered to every active subscription with commits on where either B is in `branches`, or `branches` is empty and B is the repo's current `default_branch`.
 - Each extra branch adds one request per poll, but branches with no new commits return `304` responses, which don't count against the rate limit. The per-subscription branch cap keeps the worst case bounded.
 - **Default branch changes:** the poller refreshes repo metadata (`GET /repos/{o}/{r}` with an ETag) about once a day. When `default_branch` changes, subscriptions following the default automatically move to the new branch: a baselined watch is created for it, and the cleanup task removes the old watch if nothing else uses it.
-- **Deleted branches:** if a watched branch stops existing, the poller records the error on that watch and stops polling it. The subscription stays active for its other kinds and branches, `/github status` flags the missing branch, and a one-time admin notice is sent (§8.6).
+- **Deleted branches:** if a watched branch stops existing, the poller records the error on that watch and stops polling it. The subscription stays active for its other kinds and branches, `/repodrop status` flags the missing branch, and a one-time admin notice is sent (§8.6).
 
-**Missing repos:** a `404` means the repo was deleted or made private. The poller records it in `last_error` and auto-disables every subscription to that repo with a reason (see §8.6 for how admins are told). Once every subscription is disabled, the cleanup task removes the repo's watches, so polling stops; if the repo comes back, re-running `/github subscribe` reactivates it.
+**Missing repos:** a `404` means the repo was deleted or made private. The poller records it in `last_error` and auto-disables every subscription to that repo with a reason (see §8.6 for how admins are told). Once every subscription is disabled, the cleanup task removes the repo's watches, so polling stops; if the repo comes back, re-running `/repodrop subscribe` reactivates it.
 
 **Adaptive intervals:** repos that recently changed are polled more often (around 5 minutes), and quiet repos back off gradually (up to about 60 minutes).
 
@@ -290,18 +290,18 @@ Announcements carry **link buttons** (`discord.ui.Button(style=ButtonStyle.link,
 
 - There are no download buttons, to keep announcements clean: downloads are one click away on the release page.
 - The event payload stores only what the buttons need: `html_url`, `tag_name`, and `previous_tag`.
-- The same builder renders `/github latest` replies, so both look identical and respect the same settings.
+- The same builder renders `/repodrop latest` replies, so both look identical and respect the same settings.
 
 **Embed styles:**
 
 - **Full** (default): repo, version, title, publish time, and the release notes (truncated to Discord's limit with a link to the rest).
 - **Compact:** repo, version, title and publish time only, with no release notes body. Buttons are unchanged.
 
-### 8.5 `/github latest`
+### 8.5 `/repodrop latest`
 
 A quick lookup of a repo's newest release that doesn't require a subscription.
 
-1. A member runs `/github latest repo:owner/name`, with autocomplete from the server's subscribed repos.
+1. A member runs `/repodrop latest repo:owner/name`, with autocomplete from the server's subscribed repos.
    - If `latest_access` is `managers`, non-managers get an ephemeral "only managers can use this here" reply.
    - If `public:true` is passed but `latest_allow_public` is false, the bot answers ephemerally and says public posts are turned off in this server.
 2. It calls `GET /repos/{o}/{r}/releases/latest`, which already excludes drafts and prereleases, and falls back to the newest tag if the repo has no releases. (Stored data isn't used: baselining records only a watermark, so the bot has no release details for a repo until it announces one.)
@@ -312,9 +312,9 @@ To keep this from eating the GitHub rate limit:
 - Cache lookup results in memory for about 5 minutes, keyed by repo.
 - Apply a per-user cooldown with `app_commands.checks.cooldown` (for example, 3 uses per 30 seconds).
 
-### 8.6 `/github status` and admin notices
+### 8.6 `/repodrop status` and admin notices
 
-`/github status [channel]` gives managers an ephemeral health report for the server's subscriptions.
+`/repodrop status [channel]` gives managers an ephemeral health report for the server's subscriptions.
 
 - A summary line at the top, such as "4 healthy · 1 needs attention".
 - One entry per subscription showing:
@@ -325,13 +325,13 @@ To keep this from eating the GitHub rate limit:
   - A live permission check using `channel.permissions_for(guild.me)` for View Channel, Send Messages and Embed Links, so problems show up before a post fails.
 - Discord limits an embed to 6,000 characters in total, so the report is paginated with Previous/Next buttons on a short-lived view.
 
-**Proactive notices:** when a subscription is auto-disabled (lost permissions, deleted channel, or missing repo), or a watched branch disappears, the bot posts a short notice in the server's system channel, if one is set and the bot can post there. The notice names the repo and the reason, and says that running `/github subscribe` again reactivates it. At most one notice is sent per disable.
+**Proactive notices:** when a subscription is auto-disabled (lost permissions, deleted channel, or missing repo), or a watched branch disappears, the bot posts a short notice in the server's system channel, if one is set and the bot can post there. The notice names the repo and the reason, and says that running `/repodrop subscribe` again reactivates it. At most one notice is sent per disable.
 
 The poller can't post to Discord (§6 layering rule), so notices go through the database: disabling a subscription sets `disabled_at` and leaves `notified_at` empty, and the announcer's periodic sweep sends a notice for every disabled subscription (and every errored branch watch) whose `notified_at` is empty, then sets it. That survives restarts and guarantees one notice per disable; reactivating a subscription clears both columns.
 
-### 8.7 `/github settings`
+### 8.7 `/repodrop settings`
 
-`/github settings` opens an ephemeral panel (a `discord.ui.View`) for managers. Discord allows 5 component rows per message, so the two `/github latest` settings share one select with four combined choices. Each change saves immediately and re-renders the panel. The view times out after about 5 minutes.
+`/repodrop settings` opens an ephemeral panel (a `discord.ui.View`) for managers. Discord allows 5 component rows per message, so the two `/repodrop latest` settings share one select with four combined choices. Each change saves immediately and re-renders the panel. The view times out after about 5 minutes.
 
 | Control | Component | Setting |
 |---|---|---|
@@ -339,7 +339,7 @@ The poller can't post to Discord (§6 layering rule), so notices go through the 
 | Subscriber role | Role select (with a "clear" option) | `subscriber_role_id`. When set, only members with this role (plus managers) can subscribe. Clearing it opens subscribing to everyone again. |
 | Default channel | Channel select (text and announcement channels) | `default_channel_id` |
 | Embed style | Select: Full / Compact | `embed_style` |
-| `/github latest` | Select: Anyone or Managers only, each with public posts allowed or private replies only | `latest_access`, `latest_allow_public` |
+| `/repodrop latest` | Select: Anyone or Managers only, each with public posts allowed or private replies only | `latest_access`, `latest_allow_public` |
 
 The panel also shows the operator-controlled values read-only: repo and subscription usage against their caps, and whether commit subscriptions are allowed.
 
@@ -347,22 +347,22 @@ The panel also shows the operator-controlled values read-only: repo and subscrip
 
 ### 8.8 Operator controls
 
-Owner-only commands let the bot operator manage any server by ID. They are registered **only in the operator's private dev server** (a guild-scoped command sync to `DEV_GUILD_ID`, separate from the global `/github` sync) and also checked in code against `OWNER_IDS`, so nobody else ever sees or runs them.
+Owner-only commands let the bot operator manage any server by ID. They are registered **only in the operator's private dev server** (a guild-scoped command sync to `DEV_GUILD_ID`, separate from the global `/repodrop` sync) hidden there from members without Administrator (`default_member_permissions`, which works because `/repodrop-owner` is its own top-level command), and also checked in code against `OWNER_IDS`, so nobody else ever sees or runs them. It's a separate command rather than a `/repodrop owner` subcommand because subcommands can't be registered separately from their parent, so it would appear in every server.
 
 - **Limits:** set or clear a server's `max_repos` and `max_subscriptions` overrides. Lowering a limit below current usage doesn't delete anything; it only blocks new subscriptions until usage drops.
 - **Commit subscriptions:** set `commits_allowed` per server. It defaults to true. Turning it off stops commit deliveries and blocks new commit subscriptions, but keeps existing ones so turning it back on resumes them.
 - **Block / unblock:** set `blocked` with a required `blocked_reason`.
-  - While blocked, every `/github` command in that server replies with an ephemeral notice such as "RepoDrop has been disabled for this server: {reason}", along with a contact link if you provide one.
+  - While blocked, every `/repodrop` command in that server replies with an ephemeral notice such as "RepoDrop has been disabled for this server: {reason}", along with a contact link if you provide one.
   - No new deliveries are created for the server's subscriptions, and any pending ones are marked `skipped`.
   - Subscriptions are kept, so unblocking restores the server's setup as it was.
   - The block survives the bot being removed and re-invited (§7).
 - **Inspect:** show a server's settings, usage, and recent delivery failures.
 
-The blocked check runs as a group-level `interaction_check` on `/github`, so it applies to every subcommand without repeating the logic.
+The blocked check runs as a group-level `interaction_check` on `/repodrop`, so it applies to every subcommand without repeating the logic.
 
 ## 9. Slash Commands
 
-All commands live under a `/github` group. Discord only applies `default_member_permissions` to top-level commands, so subcommands can't be gated individually. The group is left visible to everyone, and management subcommands are enforced in code with a custom `is_manager` check.
+All commands live under a `/repodrop` group. Discord only applies `default_member_permissions` to top-level commands, so subcommands can't be gated individually. The group is left visible to everyone, and management subcommands are enforced in code with a custom `is_manager` check.
 
 Two access levels are checked in code:
 
@@ -373,13 +373,13 @@ Members can remove subscriptions they created (matched on `created_by`), and man
 
 | Command | Options | Behavior |
 |---|---|---|
-| `/github subscribe` | `repo` (owner/name or URL), `channel` (default: server default, then current), `releases` / `tags` / `commits` (bool), `branches` (comma-separated or `default`), `prereleases` (bool) | Creates a subscription, or updates the existing one for that repo and channel (§8.1). Everyone by default, or the subscriber role if set; managers always. Updates are limited to the creator and managers. |
-| `/github unsubscribe` | `repo` (autocomplete: the member's own subscriptions, or all of them for managers), `channel` | Removes the subscription. Members can remove their own; managers can remove any. |
-| `/github list` | `channel` (optional) | Lists the server's or channel's subscriptions. |
-| `/github test` | `repo` | Posts the latest release to check formatting and permissions. Managers only. |
-| `/github latest` | `repo` (autocomplete), `public` (bool) | Shows a repo's newest release with buttons, no subscription needed (§8.5). Everyone by default; can be limited to managers. |
-| `/github status` | `channel` (optional) | Health report for the server's subscriptions (§8.6). Managers only. |
-| `/github settings` | none | Opens the settings panel (§8.7). Managers only; changing the manager role requires Manage Server. |
+| `/repodrop subscribe` | `repo` (owner/name or URL), `channel` (default: server default, then current), `releases` / `tags` / `commits` (bool), `branches` (comma-separated or `default`), `prereleases` (bool) | Creates a subscription, or updates the existing one for that repo and channel (§8.1). Everyone by default, or the subscriber role if set; managers always. Updates are limited to the creator and managers. |
+| `/repodrop unsubscribe` | `repo` (autocomplete: the member's own subscriptions, or all of them for managers), `channel` | Removes the subscription. Members can remove their own; managers can remove any. |
+| `/repodrop list` | `channel` (optional) | Lists the server's or channel's subscriptions. |
+| `/repodrop test` | `repo` | Posts the latest release to check formatting and permissions. Managers only. |
+| `/repodrop latest` | `repo` (autocomplete), `public` (bool) | Shows a repo's newest release with buttons, no subscription needed (§8.5). Everyone by default; can be limited to managers. |
+| `/repodrop status` | `channel` (optional) | Health report for the server's subscriptions (§8.6). Managers only. |
+| `/repodrop settings` | none | Opens the settings panel (§8.7). Managers only; changing the manager role requires Manage Server. |
 
 **Limits:** 25 distinct repos and 100 total subscriptions per server by default, overridable per server by the operator (§8.1, §8.8).
 
@@ -387,11 +387,11 @@ Members can remove subscriptions they created (matched on `created_by`), and man
 
 | Command | Behavior |
 |---|---|
-| `/owner limits guild_id max_repos max_subscriptions` | Set or clear a server's caps. |
-| `/owner commits guild_id allowed` | Allow or disallow commit subscriptions. |
-| `/owner block guild_id reason` | Block a server with a reason shown to its members. |
-| `/owner unblock guild_id` | Lift a block. |
-| `/owner inspect guild_id` | Show settings, usage and recent failures. |
+| `/repodrop-owner limits guild_id max_repos max_subscriptions` | Set or clear a server's caps. |
+| `/repodrop-owner commits guild_id allowed` | Allow or disallow commit subscriptions. |
+| `/repodrop-owner block guild_id reason` | Block a server with a reason shown to its members. |
+| `/repodrop-owner unblock guild_id` | Lift a block. |
+| `/repodrop-owner inspect guild_id` | Show settings, usage and recent failures. |
 
 ## 10. Operational Concerns
 
@@ -419,7 +419,7 @@ Members can remove subscriptions they created (matched on `created_by`), and man
 - `MAX_BRANCHES_PER_SUB` (default 5)
 - `OWNER_IDS` (Discord user IDs allowed to run owner commands)
 - `DEV_GUILD_ID` (the private server owner commands are registered in)
-- `DEV_SYNC` (default false; when true, `/github` is also synced to `DEV_GUILD_ID` for instant updates while developing. Otherwise `/github` is synced globally.)
+- `DEV_SYNC` (default false; when true, `/repodrop` is also synced to `DEV_GUILD_ID` for instant updates while developing. Otherwise `/repodrop` is synced globally.)
 - `BLOCK_CONTACT_URL` (optional link shown in block notices)
 - `POLL_MIN_INTERVAL`
 - `POLL_MAX_INTERVAL`
@@ -467,27 +467,27 @@ repodrop/
     │   └── detectors.py     # release / tag / commit diffing
     ├── announcer/
     │   ├── dispatcher.py    # claim + send + retry
-    │   └── embeds.py        # embed + link-button builders (shared with /github latest)
+    │   └── embeds.py        # embed + link-button builders (shared with /repodrop latest)
     └── bot/
         ├── client.py        # bot subclass, setup_hook starts tasks
         ├── checks.py        # is_manager, can_subscribe, blocked interaction_check
         └── cogs/
             ├── subscriptions.py # subscribe / unsubscribe / list / test
-            ├── lookup.py        # /github latest
-            ├── status.py        # /github status, admin notices
-            ├── settings.py      # /github settings panel
-            └── owner.py         # /owner commands (dev server only)
+            ├── lookup.py        # /repodrop latest
+            ├── status.py        # /repodrop status, admin notices
+            ├── settings.py      # /repodrop settings panel
+            └── owner.py         # /repodrop-owner commands (dev server only)
 ```
 
 ## 12. Build Phases
 
 1. **Foundation:** config, Logfire setup, SQLAlchemy models, first Alembic migration, and bot skeleton.
-2. **Subscriptions:** `/github subscribe` (create and update), `/github unsubscribe`, `/github list`, repo validation, the `guild_settings` table, distinct-repo and total limits, manager and blocked checks, and guild-leave cleanup.
+2. **Subscriptions:** `/repodrop subscribe` (create and update), `/repodrop unsubscribe`, `/repodrop list`, repo validation, the `guild_settings` table, distinct-repo and total limits, manager and blocked checks, and guild-leave cleanup.
 3. **Release polling:** GitHub client with ETags, the release detector, baselining, and event and delivery creation.
-4. **Announcer:** the outbox dispatcher, release embeds with link buttons, retries, handling of lost permissions, and `/github latest`.
+4. **Announcer:** the outbox dispatcher, release embeds with link buttons, retries, handling of lost permissions, and `/repodrop latest`.
 5. **More event kinds:** tags, commits (batched, multi-branch, with default-branch tracking and deleted-branch handling), and the prerelease option.
-6. **Server settings:** the `/github settings` panel, embed styles, `/github latest` access rules, the settings cache, and `/owner` commands.
-7. **Hardening:** adaptive intervals, rate-limit backoff, missing-repo handling, orphan repo cleanup, metrics, `/github test`, `/github status`, and admin notices.
+6. **Server settings:** the `/repodrop settings` panel, embed styles, `/repodrop latest` access rules, the settings cache, and `/repodrop-owner` commands.
+7. **Hardening:** adaptive intervals, rate-limit backoff, missing-repo handling, orphan repo cleanup, metrics, `/repodrop test`, `/repodrop status`, and admin notices.
 8. **Public launch:** bot listing, an invite link with minimal permissions (View Channel, Send Messages, Embed Links), and verification.
 
 ## 13. Future Work

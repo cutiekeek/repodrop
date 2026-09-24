@@ -1,7 +1,8 @@
-"""`/owner` commands: the operator's per-server controls.
+"""`/repodrop-owner` commands: the operator's per-server controls.
 
-Registered only in the operator's private server (DEV_GUILD_ID), and every command also checks
-OWNER_IDS, so nobody else can see or run them.
+Three layers keep them private: they're registered only in the operator's own server
+(DEV_GUILD_ID), hidden there from members without Administrator, and every command checks
+OWNER_IDS, so even another admin of that server can't run them.
 """
 
 from typing import TYPE_CHECKING
@@ -34,13 +35,20 @@ def parse_guild_id(value: str) -> int:
     return int(value)
 
 
-class OwnerCog(commands.GroupCog, group_name="owner", group_description="Operator controls"):
+# Hidden from members without Administrator; Discord applies this to top-level commands, which
+# this group is. Server admins can override it, so OWNER_IDS (interaction_check) is the real gate.
+@app_commands.default_permissions(administrator=True)
+class OwnerCog(
+    commands.GroupCog,
+    group_name="repodrop-owner",
+    group_description="RepoDrop operator controls",
+):
     def __init__(self, bot: "RepoDropBot") -> None:
         self.bot = bot
         super().__init__()
 
     async def interaction_check(self, interaction: discord.Interaction, /) -> bool:
-        """Runs before every /owner subcommand."""
+        """Runs before every /repodrop-owner subcommand."""
         if not is_owner(interaction.user.id, self.bot.settings.owner_ids):
             raise AccessDenied("This command is only for the bot's operator.")
         return True
@@ -94,7 +102,7 @@ class OwnerCog(commands.GroupCog, group_name="owner", group_description="Operato
 
     # ------------------------------------------------------------------ block / unblock
 
-    @app_commands.command(description="Block a server: every /github command shows the reason")
+    @app_commands.command(description="Block a server: every /repodrop command shows the reason")
     @GuildIdParam
     @app_commands.describe(reason="Shown to the server's members")
     async def block(
@@ -210,6 +218,6 @@ def _admin_summary(s: EffectiveSettings) -> str:
         f"Manager role: {role(s.manager_role_id, 'none (Manage Server only)')}\n"
         f"Subscriber role: {role(s.subscriber_role_id, 'none (everyone)')}\n"
         f"Default channel: {f'<#{s.default_channel_id}>' if s.default_channel_id else 'none'}\n"
-        f"Embed style: {s.embed_style} · /github latest: {s.latest_access}"
+        f"Embed style: {s.embed_style} · /repodrop latest: {s.latest_access}"
         f"{'' if s.latest_allow_public else ', private only'}"
     )

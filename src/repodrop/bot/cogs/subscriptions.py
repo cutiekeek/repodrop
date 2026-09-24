@@ -1,4 +1,4 @@
-"""`/github` slash commands: subscribe, unsubscribe, list, status, latest, settings, test."""
+"""`/repodrop` slash commands: subscribe, unsubscribe, list, status, latest, settings, test."""
 
 import asyncio
 import time
@@ -55,7 +55,7 @@ REQUIRED_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True
 # What a member needs in a channel to point the bot at it (managers are exempt), so nobody can
 # use the bot to post somewhere they can't post themselves.
 MEMBER_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True)
-# /github latest results are cached per repo so repeated lookups don't spend GitHub's rate limit.
+# /repodrop latest results are cached per repo so repeated lookups don't spend GitHub's rate limit.
 LATEST_CACHE_TTL = 300
 
 
@@ -63,7 +63,7 @@ LATEST_CACHE_TTL = 300
 # everyone and access is enforced per command (see bot/checks.py).
 @app_commands.guild_only()
 class SubscriptionsCog(
-    commands.GroupCog, group_name="github", group_description="Announce GitHub repo updates"
+    commands.GroupCog, group_name="repodrop", group_description="Announce GitHub repo updates"
 ):
     def __init__(self, bot: "RepoDropBot") -> None:
         self.bot = bot
@@ -71,13 +71,13 @@ class SubscriptionsCog(
         super().__init__()
 
     async def interaction_check(self, interaction: discord.Interaction, /) -> bool:
-        """Runs before every /github subcommand: blocked servers only get the block notice."""
+        """Runs before every /repodrop subcommand: blocked servers only get the block notice."""
         settings = await settings_for(interaction)
         if settings.blocked:
             raise AccessDenied(blocked_notice(settings, self.bot.settings.block_contact_url))
         return True
 
-    # ------------------------------------------------------------------ /github subscribe
+    # ------------------------------------------------------------------ /repodrop subscribe
 
     @app_commands.command(
         description="Announce a public GitHub repo's updates, or change what's announced"
@@ -279,7 +279,7 @@ class SubscriptionsCog(
                 latest = _latest_release(items or [])
         return latest
 
-    # ------------------------------------------------------------------ /github unsubscribe
+    # ------------------------------------------------------------------ /repodrop unsubscribe
 
     @app_commands.command(description="Stop announcing a repo in a channel")
     @app_commands.describe(
@@ -314,7 +314,7 @@ class SubscriptionsCog(
             f"Unsubscribed {target.mention} from **{full_name}**.", ephemeral=True
         )
 
-    # ------------------------------------------------------------------ /github list
+    # ------------------------------------------------------------------ /repodrop list
 
     @app_commands.command(name="list", description="List this server's repo subscriptions")
     @app_commands.describe(channel="Only show subscriptions for this channel")
@@ -331,7 +331,7 @@ class SubscriptionsCog(
         if not rows:
             where = channel.mention if channel else "This server"
             await interaction.response.send_message(
-                f"{where} has no subscriptions. Add one with `/github subscribe`.", ephemeral=True
+                f"{where} has no subscriptions. Add one with `/repodrop subscribe`.", ephemeral=True
             )
             return
 
@@ -351,7 +351,7 @@ class SubscriptionsCog(
         embed.set_footer(text=usage_line(usage, settings))
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    # ------------------------------------------------------------------ /github status
+    # ------------------------------------------------------------------ /repodrop status
 
     @app_commands.command(description="Health report for this server's subscriptions")
     @app_commands.describe(channel="Only show subscriptions for this channel")
@@ -368,7 +368,7 @@ class SubscriptionsCog(
         if not rows:
             where = channel.mention if channel else "This server"
             await interaction.response.send_message(
-                f"{where} has no subscriptions. Add one with `/github subscribe`.", ephemeral=True
+                f"{where} has no subscriptions. Add one with `/repodrop subscribe`.", ephemeral=True
             )
             return
 
@@ -389,7 +389,7 @@ class SubscriptionsCog(
         view = status_report.StatusView(title, summary_line, pages, interaction.user.id)
         await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
 
-    # ------------------------------------------------------------------ /github latest
+    # ------------------------------------------------------------------ /repodrop latest
 
     @app_commands.command(description="Show a repo's newest release, no subscription needed")
     @app_commands.describe(
@@ -405,7 +405,7 @@ class SubscriptionsCog(
             interaction.user,  # type: ignore[arg-type]
             settings,
         ):
-            raise AccessDenied("Only managers can use `/github latest` in this server.")
+            raise AccessDenied("Only managers can use `/repodrop latest` in this server.")
         note = None
         if public and not settings.latest_allow_public:
             public = False
@@ -458,7 +458,7 @@ class SubscriptionsCog(
         self._latest_cache[cache_key] = (time.monotonic(), kind, payload)
         return kind, payload
 
-    # ------------------------------------------------------------------ /github settings
+    # ------------------------------------------------------------------ /repodrop settings
 
     @app_commands.command(name="settings", description="Change RepoDrop's settings for this server")
     @manager_only()
@@ -480,7 +480,7 @@ class SubscriptionsCog(
         await interaction.response.send_message(embed=panel.embed(), view=panel, ephemeral=True)
         panel.origin = interaction
 
-    # ------------------------------------------------------------------ /github test
+    # ------------------------------------------------------------------ /repodrop test
 
     @app_commands.command(
         description="Post a repo's latest release to check formatting and permissions"

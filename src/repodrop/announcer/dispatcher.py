@@ -185,7 +185,7 @@ class Dispatcher:
         Notices are built from the database (the poller can't post to Discord), grouped into
         one message per server, and posted in the server's system channel when there is one
         the bot can post in. Either way they're marked sent, so nothing is retried forever;
-        `/github status` and `/github list` still show the problem.
+        `/repodrop status` and `/repodrop list` still show the problem.
         """
         async with self._sessions() as session:
             disables = await queries.pending_disable_notices(session)
@@ -230,8 +230,8 @@ class Dispatcher:
             return False
         header = "**RepoDrop** stopped announcing some updates in this server:"
         footer = (
-            "Once the cause is fixed, run `/github subscribe` for the repo and channel to resume. "
-            "`/github status` has details."
+            "Once the cause is fixed, run `/repodrop subscribe` for the repo and channel to "
+            "resume. `/repodrop status` has details."
         )
         try:
             for message in _chunk([header, *lines, footer], MESSAGE_LIMIT):

@@ -66,7 +66,7 @@ class RepoWatch(Base):
     poll_interval: Mapped[timedelta] = mapped_column(Interval, server_default=text("'10 minutes'"))
     # 'infinity' means stopped (e.g. the branch was deleted); re-subscribing resets it.
     next_poll_at: Mapped[datetime] = mapped_column(server_default=func.now(), index=True)
-    last_polled_at: Mapped[datetime | None] = mapped_column()  # shown by /github status
+    last_polled_at: Mapped[datetime | None] = mapped_column()  # shown by /repodrop status
     last_error: Mapped[str | None] = mapped_column(Text)  # cleared by the next successful poll
     notified_at: Mapped[datetime | None] = mapped_column()  # admin notice sent for a stop
 
@@ -171,7 +171,7 @@ class GuildSettings(Base):
     blocked_reason: Mapped[str | None] = mapped_column(Text)
     blocked_at: Mapped[datetime | None] = mapped_column()
 
-    # Admin-controlled (/github settings)
+    # Admin-controlled (/repodrop settings)
     manager_role_id: Mapped[int | None] = mapped_column(BigInteger)  # NULL = Manage Server only
     subscriber_role_id: Mapped[int | None] = mapped_column(BigInteger)  # NULL = everyone
     default_channel_id: Mapped[int | None] = mapped_column(BigInteger)
