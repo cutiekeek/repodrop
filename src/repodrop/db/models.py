@@ -124,3 +124,43 @@ class Delivery(Base):
     next_attempt_at: Mapped[datetime] = mapped_column(server_default=func.now())
     message_id: Mapped[int | None] = mapped_column(BigInteger)
     last_error: Mapped[str | None] = mapped_column(Text)
+
+
+class EmbedStyle(StrEnum):
+    FULL = "full"
+    COMPACT = "compact"
+
+
+class LatestAccess(StrEnum):
+    EVERYONE = "everyone"
+    MANAGERS = "managers"
+
+
+class GuildSettings(Base):
+    """Per-server settings. A missing row means every setting uses its default.
+
+    Nullable limit columns fall back to the global config value.
+    """
+
+    __tablename__ = "guild_settings"
+
+    guild_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+
+    # Operator-controlled (owner commands only)
+    max_repos: Mapped[int | None] = mapped_column(Integer)
+    max_subscriptions: Mapped[int | None] = mapped_column(Integer)
+    commits_allowed: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    blocked: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    blocked_reason: Mapped[str | None] = mapped_column(Text)
+    blocked_at: Mapped[datetime | None] = mapped_column()
+
+    # Admin-controlled (/github settings)
+    manager_role_id: Mapped[int | None] = mapped_column(BigInteger)  # NULL = Manage Server only
+    subscriber_role_id: Mapped[int | None] = mapped_column(BigInteger)  # NULL = everyone
+    default_channel_id: Mapped[int | None] = mapped_column(BigInteger)
+    embed_style: Mapped[str] = mapped_column(Text, server_default=EmbedStyle.FULL.value)
+    show_asset_buttons: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    latest_access: Mapped[str] = mapped_column(Text, server_default=LatestAccess.EVERYONE.value)
+    latest_allow_public: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+
+    updated_at: Mapped[datetime] = mapped_column(server_default=func.now())

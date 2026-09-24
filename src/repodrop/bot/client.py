@@ -10,6 +10,7 @@ from repodrop.config import Settings
 from repodrop.db import queries
 from repodrop.db.session import create_engine, create_session_factory
 from repodrop.github.client import GitHubClient
+from repodrop.guild_settings import GuildSettingsCache
 from repodrop.poller.scheduler import Poller
 
 
@@ -27,6 +28,7 @@ class RepoDropBot(commands.Bot):
         self.engine = create_engine(settings.database_url)
         self.sessions = create_session_factory(self.engine)
         self.github = GitHubClient(settings.github_token.get_secret_value())
+        self.guild_settings = GuildSettingsCache(settings, self.sessions)
         self.announcer_wake = asyncio.Event()
         self.poller = Poller(settings, self.sessions, self.github, self.announcer_wake)
         self.dispatcher = Dispatcher(settings, self.sessions, self, self.announcer_wake)
@@ -70,7 +72,9 @@ class RepoDropBot(commands.Bot):
         with logfire.span("guild_remove", guild_id=guild.id):
             async with self.sessions.begin() as session:
                 deleted = await queries.delete_guild_subscriptions(session, guild.id)
+                await queries.delete_guild_settings_unless_blocked(session, guild.id)
                 await queries.prune_orphans(session)
+            self.guild_settings.invalidate(guild.id)
             logfire.info(
                 "removed from guild {guild_id}; deleted {count} subscriptions",
                 guild_id=guild.id,

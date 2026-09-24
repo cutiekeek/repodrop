@@ -71,7 +71,7 @@ async def test_upserts_are_idempotent(sessions):
             created_by=USER,
         )
         assert not created and again.id == sub.id
-        assert await queries.count_active_guild_subscriptions(s, GUILD) == 1
+        assert await queries.guild_usage(s, GUILD) == queries.GuildUsage(repos=1, subscriptions=1)
 
     async with sessions() as s:
         [(listed, listed_repo)] = await queries.list_subscriptions(s, GUILD)
@@ -422,3 +422,95 @@ async def test_dispatcher_retries_then_fails(sessions):
     async with sessions() as s:
         [d] = (await s.scalars(select(Delivery))).all()
         assert d.status == "failed" and d.attempts == 2 and "503" in d.last_error
+
+
+# --------------------------------------------------------------------------- guild settings
+
+
+async def test_guild_usage_counts_distinct_repos_and_disabled(sessions):
+    async with sessions.begin() as s:
+        repo, first = await make_sub(s, channel=1)
+        await make_sub(s, channel=2)  # same repo, another channel
+        other = await queries.upsert_repo(
+            s, github_id=43, full_name="octo/other", default_branch="main"
+        )
+        await queries.upsert_subscription(
+            s,
+            guild_id=GUILD,
+            channel_id=1,
+            repo_id=other.id,
+            kinds=["release"],
+            branch=None,
+            include_prereleases=False,
+            created_by=USER,
+        )
+        await queries.deactivate_subscription(s, first.id)  # disabled still counts
+
+        assert await queries.guild_usage(s, GUILD) == queries.GuildUsage(repos=2, subscriptions=3)
+        assert await queries.guild_usage(s, 999) == queries.GuildUsage(repos=0, subscriptions=0)
+        assert await queries.guild_follows_repo(s, GUILD, repo.id)
+        assert not await queries.guild_follows_repo(s, 999, repo.id)
+
+
+async def test_search_repo_names_by_creator(sessions):
+    async with sessions.begin() as s:
+        await make_sub(s)  # created by USER
+        assert await queries.search_guild_repo_names(s, GUILD, "", created_by=USER) == [
+            "octo/widget"
+        ]
+        assert await queries.search_guild_repo_names(s, GUILD, "", created_by=USER + 1) == []
+
+
+async def test_settings_cache_defaults_updates_and_invalidation(sessions):
+    from repodrop.guild_settings import GuildSettingsCache
+
+    cache = GuildSettingsCache(settings(), sessions)
+    defaults = await cache.get(GUILD)
+    assert (defaults.max_repos, defaults.max_subscriptions, defaults.blocked) == (25, 100, False)
+
+    updated = await cache.update(GUILD, max_repos=3, manager_role_id=77)
+    assert (updated.max_repos, updated.max_subscriptions, updated.manager_role_id) == (3, 100, 77)
+
+    # A direct database edit is only seen after invalidation (or the TTL).
+    async with sessions.begin() as s:
+        await queries.upsert_guild_settings(s, GUILD, blocked=True, blocked_reason="spam")
+    assert (await cache.get(GUILD)).blocked is False
+    cache.invalidate(GUILD)
+    assert (await cache.get(GUILD)).blocked_reason == "spam"
+
+
+async def test_guild_removal_keeps_settings_only_when_blocked(sessions):
+    async with sessions.begin() as s:
+        await queries.upsert_guild_settings(s, 1, manager_role_id=5)
+        await queries.upsert_guild_settings(s, 2, blocked=True, blocked_reason="abuse")
+        await queries.delete_guild_settings_unless_blocked(s, 1)
+        await queries.delete_guild_settings_unless_blocked(s, 2)
+        assert await queries.get_guild_settings(s, 1) is None
+        assert (await queries.get_guild_settings(s, 2)).blocked_reason == "abuse"
+
+
+async def test_guild_lock_serializes_transactions(sessions):
+    order: list[str] = []
+    first_has_lock = asyncio.Event()
+
+    async def first():
+        async with sessions.begin() as s:
+            await queries.lock_guild(s, GUILD)
+            first_has_lock.set()
+            await asyncio.sleep(0.3)
+            order.append("first done")
+
+    async def second():
+        await first_has_lock.wait()
+        async with sessions.begin() as s:
+            await queries.lock_guild(s, GUILD)  # blocks until first commits
+            order.append("second locked")
+
+    async def other_guild():
+        await first_has_lock.wait()
+        async with sessions.begin() as s:
+            await queries.lock_guild(s, GUILD + 1)  # different server: no wait
+            order.append("other guild locked")
+
+    await asyncio.gather(first(), second(), other_guild())
+    assert order == ["other guild locked", "first done", "second locked"]

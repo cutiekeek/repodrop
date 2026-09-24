@@ -1,8 +1,10 @@
+import json
 from datetime import timedelta
 from functools import lru_cache
+from typing import Annotated
 
 from pydantic import SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
 class DatabaseSettings(BaseSettings):
@@ -33,7 +35,18 @@ class Settings(DatabaseSettings):
     # If set, slash commands are synced to this guild only (instant updates while developing).
     dev_guild_id: int | None = None
 
-    max_subs_per_guild: int = 25
+    # Default per-server caps; the operator can override them per server (guild_settings).
+    max_repos_per_guild: int = 25  # distinct repos
+    max_subs_per_guild: int = 100  # (channel, repo) pairs
+
+    # Discord user IDs allowed to run owner commands: "123,456" or a JSON list.
+    owner_ids: Annotated[list[int], NoDecode] = []
+    # Optional link shown in the notice a blocked server sees.
+    block_contact_url: str | None = None
+
+    # Effective per-server settings are cached this long; writes through the bot invalidate
+    # immediately, so this only bounds how long a direct database edit takes to be seen.
+    guild_settings_cache_ttl: timedelta = timedelta(seconds=60)
 
     # Durations accept seconds ("300") or ISO 8601 ("PT5M").
     poll_min_interval: timedelta = timedelta(minutes=5)
@@ -59,6 +72,7 @@ class Settings(DatabaseSettings):
         "poll_tick",
         "announcer_sweep_interval",
         "maintenance_interval",
+        "guild_settings_cache_ttl",
         mode="before",
     )
     @classmethod
@@ -66,6 +80,16 @@ class Settings(DatabaseSettings):
         # Env vars arrive as strings, and pydantic only treats numbers (not "300") as seconds.
         if isinstance(v, str) and v.strip().replace(".", "", 1).isdigit():
             return float(v)
+        return v
+
+    @field_validator("owner_ids", mode="before")
+    @classmethod
+    def _id_list(cls, v: object) -> object:
+        if isinstance(v, str):
+            v = v.strip()
+            if v.startswith("["):
+                return json.loads(v)
+            return [part.strip() for part in v.split(",") if part.strip()]
         return v
 
 

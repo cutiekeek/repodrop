@@ -1,17 +1,18 @@
-# RepoWatch — Design Document
+# RepoDrop — Design Document
 
 > Working name. A public Discord bot that watches public GitHub repositories and announces updates in subscribed channels.
 
 ## 1. Overview
 
-RepoWatch lets any Discord server subscribe channels to public GitHub repositories. When a watched repo publishes a release, pushes a tag, or (optionally) gets new commits, the bot posts an announcement to every subscribed channel.
+RepoDrop lets any Discord server subscribe channels to public GitHub repositories. When a watched repo publishes a release, pushes a tag, or (optionally) gets new commits, the bot posts an announcement to every subscribed channel.
 
 The bot is multi-tenant: each server manages its own subscription list, and all servers share a single polling pipeline so each repo is checked once regardless of how many servers follow it.
 
 ## 2. Goals
 
 - **Public and multi-server.** Any server can invite the bot, and each server's subscriptions are isolated by guild ID.
-- **Self-service management.** Server admins can add, remove, and list repo subscriptions with slash commands.
+- **Self-service management.** Any member can add repo subscriptions by default, and servers can limit that to a subscriber role. Server admins, and members with a manager role they choose, can manage every subscription and adjust server settings with slash commands.
+- **Operator control.** The bot owner can raise or lower limits, restrict commit subscriptions, or block an abusive server entirely.
 - **Reliable delivery.** No missed announcements after a crash, and no duplicate posts on retry.
 - **Efficient GitHub usage.** Each repo is polled once for all subscribers, and conditional requests (ETags) keep the rate-limit cost low.
 - **Observable.** Every poll and delivery is traceable end to end in Logfire.
@@ -37,6 +38,8 @@ The bot is multi-tenant: each server manages its own subscription list, and all 
 | Web framework | None in v1 | No webhooks or dashboard yet. Deferred to Future Work. |
 | Redis | Not used | Postgres covers queueing, dedup, and locking at this scale. |
 | Commands | Slash commands only | Avoids the privileged message content intent, which simplifies verification. |
+| Commit branches | A list of branches per subscription, one poll watch per branch | Lets one subscription follow several branches. Branches shared across subscriptions are polled once, and unchanged branches return free `304`s. |
+| Per-server settings | `guild_settings` table, `NULL` = global default | One row per server holds both operator limits and admin preferences. Settings are cached in memory per server. |
 | Logging/tracing | Pydantic Logfire | Structured spans across GitHub calls, DB queries, and Discord sends. |
 
 ## 5. Tech Stack
@@ -89,19 +92,24 @@ CREATE TABLE repos (
     github_id      BIGINT NOT NULL UNIQUE,
     full_name      TEXT   NOT NULL,          -- display only; refreshed on poll
     default_branch TEXT   NOT NULL,
+    metadata_etag  TEXT,                      -- for the daily repo metadata refresh
+    metadata_checked_at TIMESTAMPTZ,
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Poll state per (repo, event kind). Only kinds with at least one
--- active subscription are polled.
+-- Poll state per (repo, event kind, branch). Only watches that at least
+-- one active subscription needs are polled.
 CREATE TABLE repo_watches (
     repo_id        BIGINT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     kind           TEXT   NOT NULL,           -- 'release' | 'tag' | 'commit'
-    branch         TEXT   NOT NULL DEFAULT '', -- used for 'commit' only
+    branch         TEXT   NOT NULL DEFAULT '', -- concrete branch name for 'commit'; '' otherwise
     etag           TEXT,
-    last_seen_id   TEXT,                       -- release ID, tag name, or commit SHA
+    last_seen_id   TEXT,                       -- watermark: newest release's published_at, tag name, or commit SHA
     poll_interval  INTERVAL NOT NULL DEFAULT '10 minutes',
     next_poll_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_polled_at TIMESTAMPTZ,                -- shown by /github status
+    last_error     TEXT,                       -- e.g. repo deleted or made private
+    notified_at    TIMESTAMPTZ,                -- admin notice sent for a deleted branch (§8.6)
     PRIMARY KEY (repo_id, kind, branch)
 );
 
@@ -112,9 +120,12 @@ CREATE TABLE subscriptions (
     channel_id          BIGINT NOT NULL,
     repo_id             BIGINT NOT NULL REFERENCES repos(id),
     kinds               TEXT[] NOT NULL DEFAULT '{release}',
-    branch              TEXT,                  -- NULL = default branch
+    branches            TEXT[] NOT NULL DEFAULT '{}', -- commit branches; empty = follow the default branch
     include_prereleases BOOLEAN NOT NULL DEFAULT false,
     active              BOOLEAN NOT NULL DEFAULT true,
+    disabled_reason     TEXT,                  -- set when auto-disabled
+    disabled_at         TIMESTAMPTZ,
+    notified_at         TIMESTAMPTZ,           -- admin notice sent for the current disable (§8.6)
     created_by          BIGINT NOT NULL,       -- Discord user ID
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (guild_id, channel_id, repo_id)
@@ -128,7 +139,7 @@ CREATE TABLE events (
     repo_id     BIGINT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     kind        TEXT   NOT NULL,
     external_id TEXT   NOT NULL,               -- release ID / tag name / push range
-    payload     JSONB  NOT NULL,
+    payload     JSONB  NOT NULL,               -- includes html_url, previous_tag, assets (§8.4)
     detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (repo_id, kind, external_id)
 );
@@ -142,24 +153,82 @@ CREATE TABLE deliveries (
     attempts        INT    NOT NULL DEFAULT 0,
     next_attempt_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     message_id      BIGINT,
+    sent_at         TIMESTAMPTZ,
     last_error      TEXT,
     UNIQUE (event_id, subscription_id)
 );
 CREATE INDEX ON deliveries (next_attempt_at) WHERE status = 'pending';
+CREATE INDEX ON deliveries (subscription_id, sent_at DESC) WHERE status = 'sent';
 ```
 
-When a guild removes the bot, its subscriptions are deleted, and the cascades clean up their deliveries. Orphaned repos (no subscriptions left) can be pruned by a periodic cleanup task.
+```sql
+-- Per-server settings. A missing row means every setting uses its default.
+-- Nullable columns fall back to the global config value.
+CREATE TABLE guild_settings (
+    guild_id            BIGINT PRIMARY KEY,
+
+    -- Operator-controlled (owner commands only, §8.8)
+    max_repos           INT,                   -- NULL = MAX_REPOS_PER_GUILD
+    max_subscriptions   INT,                   -- NULL = MAX_SUBS_PER_GUILD
+    commits_allowed     BOOLEAN NOT NULL DEFAULT true,
+    blocked             BOOLEAN NOT NULL DEFAULT false,
+    blocked_reason      TEXT,                  -- shown to the server on any /github command
+    blocked_at          TIMESTAMPTZ,
+
+    -- Admin-controlled (/github settings, §8.7)
+    manager_role_id     BIGINT,                -- NULL = Manage Server only
+    subscriber_role_id  BIGINT,                -- NULL = everyone can subscribe
+    default_channel_id  BIGINT,                -- NULL = channel the command was run in
+    embed_style         TEXT NOT NULL DEFAULT 'full',     -- 'full' | 'compact'
+    show_asset_buttons  BOOLEAN NOT NULL DEFAULT true,
+    latest_access       TEXT NOT NULL DEFAULT 'everyone', -- 'everyone' | 'managers'
+    latest_allow_public BOOLEAN NOT NULL DEFAULT true,
+
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+When a guild removes the bot, its subscriptions are deleted, and the cascades clean up their deliveries. Its `guild_settings` row is deleted too, **unless the server is blocked**: blocked rows are kept so that re-inviting the bot doesn't escape the block. Orphaned repos (no subscriptions left) and watches that no subscription needs anymore (a removed kind or branch) are pruned by a periodic cleanup task.
 
 ## 8. Core Flows
 
-### 8.1 Subscribe
+### 8.1 Subscribe (create or update)
 
-1. An admin runs `/github subscribe`.
-2. The bot resolves `owner/name` via `GET /repos/{owner}/{repo}` and rejects private or missing repos with a clear message.
-3. It upserts into `repos` by `github_id` and inserts the subscription (a unique violation means "already subscribed").
-4. It ensures a `repo_watches` row exists for each requested kind.
-5. **Baseline:** if the watch is new, the bot fetches the current latest item and stores it as `last_seen_id` *without* creating an event, so new subscribers don't get flooded with old releases.
-6. It confirms with an ephemeral reply showing the latest release as a preview.
+`/github subscribe` both creates subscriptions and modifies existing ones. A subscription is identified by (server, channel, repo), so running the command again for the same repo and channel updates it instead of failing.
+
+**Options:** `repo`, `channel`, `releases`, `tags` and `commits` (booleans), `branches` (comma-separated names, or `default`), and `prereleases` (boolean). Event kinds are separate booleans rather than one choice option because Discord slash options can't multi-select, and separate booleans let an update switch one kind on or off without touching the others.
+
+1. A member with subscribe access (§9) runs `/github subscribe`. If the server is blocked, the bot replies with the block notice instead (§8.8). A per-user cooldown (for example, 5 subscribes per minute) keeps anyone from filling the server's caps in one burst.
+2. The target channel is the `channel` option if given, otherwise the server's `default_channel_id`, otherwise the current channel. Before saving, the bot checks two sets of permissions in that channel:
+   - **The bot's own:** View Channel, Send Messages and Embed Links, so the subscription can actually post.
+   - **The member's:** View Channel and Send Messages. Without this, a member could use the bot to post into a channel they can't post in themselves, such as a read-only announcements channel. Managers skip this check.
+3. The bot resolves `owner/name` via `GET /repos/{owner}/{repo}` and rejects private or missing repos with a clear message.
+4. The rest runs in one transaction holding `pg_advisory_xact_lock(guild_id)`, so concurrent subscribes in the same server can't race each other. The bot looks up an existing subscription for (server, channel, repo) and takes the create or update path below.
+5. **Checks on both paths:**
+   - If commits would be on and `commits_allowed` is false for the server, the request is rejected with a short explanation.
+   - Each listed branch is validated with `GET /repos/{o}/{r}/branches/{branch}`, and unknown branches are rejected by name. A subscription can list at most `MAX_BRANCHES_PER_SUB` branches (default 5).
+6. The bot ensures a `repo_watches` row exists for every (kind, branch) the subscription now needs. For commits, that's one watch per listed branch, or the repo's current default branch when the list is empty.
+7. **Baseline:** each newly created watch fetches the current latest item and stores it as `last_seen_id` *without* creating an event, so new subscribers (or newly added branches) don't get flooded with old items.
+8. It confirms with an ephemeral reply: a preview of the latest release plus current usage for a new subscription (for example, "Repos 7/25 · Subscriptions 9/100"), or a summary of what changed for an update (for example, "Added commits on `main`, `dev` · Removed tags").
+
+**Creating a subscription:**
+
+- Omitted options use defaults: releases on, tags and commits off, commits following the default branch, prereleases off.
+- **Limits:** the bot checks two caps before inserting.
+  - **Distinct repos** (`max_repos`, default 25): `COUNT(DISTINCT repo_id)` across the server's subscriptions. Following a repo the server already watches, in another channel, doesn't count again. Polling is per repo, so extra channels add no GitHub API calls.
+  - **Total subscriptions** (`max_subscriptions`, default 100): every (channel, repo) pair counts. This bounds Discord posting volume rather than API usage.
+  - Disabled subscriptions still count toward both caps, so reactivating one never fails on a limit.
+- The bot upserts into `repos` by `github_id` and inserts the subscription with `created_by` set to the member.
+
+**Updating a subscription:**
+
+- Only the subscription's creator (`created_by`) or a manager can change it. Anyone else gets a reply saying the subscription already exists and who can modify it.
+- Only the options passed are changed; omitted options keep their current values. For example, `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` replaces the branch list, and `branches:default` goes back to following the default branch.
+- An update that would leave no event kinds on is rejected, with a pointer to `/github unsubscribe`.
+- A disabled subscription is reactivated and its `disabled_reason` cleared.
+- Updates don't change the server's repo or subscription counts, so those caps aren't rechecked. The branch cap still applies.
+- Pending deliveries for kinds or branches that were just removed are marked `skipped`.
+- Moving a subscription to a different channel isn't an update, since the channel is part of its identity. That's an unsubscribe in the old channel and a subscribe in the new one.
 
 ### 8.2 Poll
 
@@ -169,15 +238,26 @@ When a guild removes the bot, its subscriptions are deleted, and the cascades cl
    - On `200`, parse with Pydantic, collect items newer than `last_seen_id`, and update the etag.
 3. In one transaction:
    - Insert `events` with `ON CONFLICT DO NOTHING`.
-   - Insert `deliveries` for every active subscription whose `kinds` (and prerelease setting) match.
+   - Insert `deliveries` for every active subscription whose `kinds` (and prerelease setting) match, joined against `guild_settings` to skip blocked servers and, for commit events, servers with `commits_allowed = false`. Skipped subscriptions keep their rows, so unblocking or re-allowing commits resumes delivery.
    - Advance `last_seen_id` and `next_poll_at`.
 4. Set the announcer's `asyncio.Event`.
 
 **Endpoints by kind:**
 
-- Releases use `GET /repos/{o}/{r}/releases?per_page=10`, skipping drafts and skipping prereleases unless the subscription opts in.
-- Tags use `GET /repos/{o}/{r}/tags?per_page=10`.
-- Commits use `GET /repos/{o}/{r}/commits?sha={branch}&per_page=20`, and all new commits from one poll become a single batched event.
+- Releases use `GET /repos/{o}/{r}/releases?per_page=10`, skipping drafts and skipping prereleases unless the subscription opts in. Each new release's payload records the tag of the next-older release in the same response as `previous_tag`, for the Compare button (§8.4).
+- Tags use `GET /repos/{o}/{r}/tags?per_page=10`. Each new tag's payload records the next tag in the same response as `previous_tag`, for the Compare button.
+- Commits use `GET /repos/{o}/{r}/commits?sha={branch}&per_page=20`, polled separately for each watched branch. All new commits on one branch from one poll become a single batched event whose payload includes the branch name, with `external_id` set to `{branch}:{before_sha}..{after_sha}`.
+
+**Multiple branches:**
+
+- Each watched branch is its own `repo_watches` row with its own ETag and last-seen SHA. The watch key already includes the branch, so the only schema change for multi-branch support is storing a list on subscriptions.
+- Watches are shared. If one subscription lists `main` explicitly and another follows the default branch, which is `main`, both use the same watch, so there are no duplicate API calls or duplicate events.
+- A commit event on branch B is delivered to every active subscription with commits on where either B is in `branches`, or `branches` is empty and B is the repo's current `default_branch`.
+- Each extra branch adds one request per poll, but branches with no new commits return `304` responses, which don't count against the rate limit. The per-subscription branch cap keeps the worst case bounded.
+- **Default branch changes:** the poller refreshes repo metadata (`GET /repos/{o}/{r}` with an ETag) about once a day. When `default_branch` changes, subscriptions following the default automatically move to the new branch: a baselined watch is created for it, and the cleanup task removes the old watch if nothing else uses it.
+- **Deleted branches:** if a watched branch stops existing, the poller records the error on that watch and stops polling it. The subscription stays active for its other kinds and branches, `/github status` flags the missing branch, and a one-time admin notice is sent (§8.6).
+
+**Missing repos:** a `404` means the repo was deleted or made private. The poller records it in `last_error` and auto-disables every subscription to that repo with a reason (see §8.6 for how admins are told). Once every subscription is disabled, the cleanup task removes the repo's watches, so polling stops; if the repo comes back, re-running `/github subscribe` reactivates it.
 
 **Adaptive intervals:** repos that recently changed are polled more often (around 5 minutes), and quiet repos back off gradually (up to about 60 minutes).
 
@@ -191,25 +271,131 @@ When a guild removes the bot, its subscriptions are deleted, and the cascades cl
    LIMIT 50
    FOR UPDATE SKIP LOCKED;
    ```
-2. Build the embed from the event payload and send it with `allowed_mentions=AllowedMentions.none()`.
-3. On success, set `status='sent'` and record `message_id`.
+2. Build the embed and its link buttons (§8.4) from the event payload, using the server's `embed_style` and `show_asset_buttons` settings, and send it with `allowed_mentions=AllowedMentions.none()`.
+3. On success, set `status='sent'` and record `message_id` and `sent_at`.
 4. On failure:
-   - A Discord `Forbidden` or `NotFound` error (channel deleted or permissions lost) deactivates the subscription and marks the delivery `skipped`.
+   - A Discord `Forbidden` or `NotFound` error (channel deleted or permissions lost) deactivates the subscription with a `disabled_reason`, marks the delivery `skipped`, and sends the admin notice described in §8.6.
    - Transient errors increment `attempts` and schedule an exponential backoff on `next_attempt_at`.
    - After 5 failed attempts, the delivery is marked `failed`.
 
+### 8.4 Release embed buttons
+
+Announcements carry **link buttons** (`discord.ui.Button(style=ButtonStyle.link, url=...)`). Link buttons open a URL directly, so they need no interaction handlers or persistent views and keep working across bot restarts.
+
+| Event kind | Buttons |
+|---|---|
+| Release | **View release** (`html_url`), **Compare** (`/compare/{previous_tag}...{tag}`, omitted when there's no previous tag), and up to 3 **Download** buttons for release assets |
+| Tag | **View tag**, **Compare** |
+| Commits (batched, per branch) | **View commits** (`/compare/{before_sha}...{after_sha}`). The embed title names the branch. |
+
+- Discord allows 5 buttons per row, so a release uses at most one row. When a release has more than 3 assets, the embed footer says how many more are on the release page.
+- Button labels are capped at 80 characters, so long asset names are truncated.
+- The event payload stores only what the buttons need: `html_url`, `tag_name`, `previous_tag`, and the first 3 assets' `name`, `browser_download_url` and `size`, plus the total asset count.
+- Download buttons are left out when the server has `show_asset_buttons` turned off.
+- The same builder renders `/github latest` replies, so both look identical and respect the same settings.
+
+**Embed styles:**
+
+- **Full** (default): repo, version, title, publish time, and the release notes (truncated to Discord's limit with a link to the rest).
+- **Compact:** repo, version, title and publish time only, with no release notes body. Buttons are unchanged.
+
+### 8.5 `/github latest`
+
+A quick lookup of a repo's newest release that doesn't require a subscription.
+
+1. A member runs `/github latest repo:owner/name`, with autocomplete from the server's subscribed repos.
+   - If `latest_access` is `managers`, non-managers get an ephemeral "only managers can use this here" reply.
+   - If `public:true` is passed but `latest_allow_public` is false, the bot answers ephemerally and says public posts are turned off in this server.
+2. It calls `GET /repos/{o}/{r}/releases/latest`, which already excludes drafts and prereleases, and falls back to the newest tag if the repo has no releases. (Stored data isn't used: baselining records only a watermark, so the bot has no release details for a repo until it announces one.)
+3. It replies with the standard release embed and buttons. The reply is ephemeral by default, and a `public:true` option posts it visibly in the channel.
+
+To keep this from eating the GitHub rate limit:
+
+- Cache lookup results in memory for about 5 minutes, keyed by repo.
+- Apply a per-user cooldown with `app_commands.checks.cooldown` (for example, 3 uses per 30 seconds).
+
+### 8.6 `/github status` and admin notices
+
+`/github status [channel]` gives managers an ephemeral health report for the server's subscriptions.
+
+- A summary line at the top, such as "4 healthy · 1 needs attention".
+- One entry per subscription showing:
+  - The repo, channel, event kinds, and commit branches.
+  - Its state: active, or disabled with its `disabled_reason`.
+  - When it last posted, rendered as a Discord relative timestamp (`<t:unix:R>`).
+  - When its repo was last polled, and any poll error, including branches that no longer exist.
+  - A live permission check using `channel.permissions_for(guild.me)` for View Channel, Send Messages and Embed Links, so problems show up before a post fails.
+- Discord limits an embed to 6,000 characters in total, so the report is paginated with Previous/Next buttons on a short-lived view.
+
+**Proactive notices:** when a subscription is auto-disabled (lost permissions, deleted channel, or missing repo), or a watched branch disappears, the bot posts a short notice in the server's system channel, if one is set and the bot can post there. The notice names the repo and the reason, and says that running `/github subscribe` again reactivates it. At most one notice is sent per disable.
+
+The poller can't post to Discord (§6 layering rule), so notices go through the database: disabling a subscription sets `disabled_at` and leaves `notified_at` empty, and the announcer's periodic sweep sends a notice for every disabled subscription (and every errored branch watch) whose `notified_at` is empty, then sets it. That survives restarts and guarantees one notice per disable; reactivating a subscription clears both columns.
+
+### 8.7 `/github settings`
+
+`/github settings` opens an ephemeral panel (a `discord.ui.View`) for managers. Each change saves immediately and re-renders the panel. The view times out after about 5 minutes.
+
+| Control | Component | Setting |
+|---|---|---|
+| Manager role | Role select (with a "clear" option) | `manager_role_id`. Only members with Manage Server can change this, so a manager can't grant or remove manager access. |
+| Subscriber role | Role select (with a "clear" option) | `subscriber_role_id`. When set, only members with this role (plus managers) can subscribe. Clearing it opens subscribing to everyone again. |
+| Default channel | Channel select (text and announcement channels) | `default_channel_id` |
+| Embed style | Select: Full / Compact | `embed_style` |
+| Download buttons | Toggle button | `show_asset_buttons` |
+| Who can use `/github latest` | Select: Everyone / Managers only | `latest_access` |
+| Allow public `/github latest` | Toggle button | `latest_allow_public` |
+
+The panel also shows the operator-controlled values read-only: repo and subscription usage against their caps, and whether commit subscriptions are allowed.
+
+**Settings cache:** effective settings (`guild_value ?? config_default`) are cached in memory per server and invalidated on every write, since the announcer and commands read them constantly. If the bot is ever split into multiple processes, invalidate through Postgres `LISTEN/NOTIFY`.
+
+### 8.8 Operator controls
+
+Owner-only commands let the bot operator manage any server by ID. They are registered **only in the operator's private dev server** (a guild-scoped command sync to `DEV_GUILD_ID`, separate from the global `/github` sync) and also checked in code against `OWNER_IDS`, so nobody else ever sees or runs them.
+
+- **Limits:** set or clear a server's `max_repos` and `max_subscriptions` overrides. Lowering a limit below current usage doesn't delete anything; it only blocks new subscriptions until usage drops.
+- **Commit subscriptions:** set `commits_allowed` per server. It defaults to true. Turning it off stops commit deliveries and blocks new commit subscriptions, but keeps existing ones so turning it back on resumes them.
+- **Block / unblock:** set `blocked` with a required `blocked_reason`.
+  - While blocked, every `/github` command in that server replies with an ephemeral notice such as "RepoDrop has been disabled for this server: {reason}", along with a contact link if you provide one.
+  - No new deliveries are created for the server's subscriptions, and any pending ones are marked `skipped`.
+  - Subscriptions are kept, so unblocking restores the server's setup as it was.
+  - The block survives the bot being removed and re-invited (§7).
+- **Inspect:** show a server's settings, usage, and recent delivery failures.
+
+The blocked check runs as a group-level `interaction_check` on `/github`, so it applies to every subcommand without repeating the logic.
+
 ## 9. Slash Commands
 
-All commands live under a `/github` group, gated with `default_member_permissions=manage_guild`, and replies are ephemeral.
+All commands live under a `/github` group. Discord only applies `default_member_permissions` to top-level commands, so subcommands can't be gated individually. The group is left visible to everyone, and management subcommands are enforced in code with a custom `is_manager` check.
+
+Two access levels are checked in code:
+
+- A **manager** is a member with the Manage Server permission, or a member with the server's `manager_role_id` role if one is set.
+- **Subscribe access** belongs to everyone by default. When the server sets `subscriber_role_id`, it's limited to members with that role. Managers always have subscribe access, whether or not they hold the subscriber role.
+
+Members can remove subscriptions they created (matched on `created_by`), and managers can remove any subscription. Replies are ephemeral unless noted.
 
 | Command | Options | Behavior |
 |---|---|---|
-| `/github subscribe` | `repo` (owner/name or URL), `events` (releases/tags/commits), `channel` (default: current), `prereleases` (bool) | Validates the repo and creates the subscription. |
-| `/github unsubscribe` | `repo` (autocomplete from this server's subs), `channel` | Removes the subscription. |
+| `/github subscribe` | `repo` (owner/name or URL), `channel` (default: server default, then current), `releases` / `tags` / `commits` (bool), `branches` (comma-separated or `default`), `prereleases` (bool) | Creates a subscription, or updates the existing one for that repo and channel (§8.1). Everyone by default, or the subscriber role if set; managers always. Updates are limited to the creator and managers. |
+| `/github unsubscribe` | `repo` (autocomplete: the member's own subscriptions, or all of them for managers), `channel` | Removes the subscription. Members can remove their own; managers can remove any. |
 | `/github list` | `channel` (optional) | Lists the server's or channel's subscriptions. |
-| `/github test` | `repo` | Posts the latest release to check formatting and permissions. |
+| `/github test` | `repo` | Posts the latest release to check formatting and permissions. Managers only. |
+| `/github latest` | `repo` (autocomplete), `public` (bool) | Shows a repo's newest release with buttons, no subscription needed (§8.5). Everyone by default; can be limited to managers. |
+| `/github status` | `channel` (optional) | Health report for the server's subscriptions (§8.6). Managers only. |
+| `/github settings` | none | Opens the settings panel (§8.7). Managers only; changing the manager role requires Manage Server. |
 
-**Limits:** 25 subscriptions per server by default, stored as a config value so it can be raised for specific servers later.
+**Limits:** 25 distinct repos and 100 total subscriptions per server by default, overridable per server by the operator (§8.1, §8.8).
+
+**Owner commands** (dev server only, §8.8):
+
+| Command | Behavior |
+|---|---|
+| `/owner limits guild_id max_repos max_subscriptions` | Set or clear a server's caps. |
+| `/owner commits guild_id allowed` | Allow or disallow commit subscriptions. |
+| `/owner block guild_id reason` | Block a server with a reason shown to its members. |
+| `/owner unblock guild_id` | Lift a block. |
+| `/owner inspect guild_id` | Show settings, usage and recent failures. |
 
 ## 10. Operational Concerns
 
@@ -223,7 +409,7 @@ All commands live under a `/github` group, gated with `default_member_permission
 
 - Enforce embed limits: a 4096-character description (truncate release notes and link to the full release) and a 256-character title.
 - Disable all mentions so release notes can never ping anyone.
-- Use `on_guild_remove` to delete that guild's subscriptions.
+- Use `on_guild_remove` to delete that guild's subscriptions and settings, keeping the settings row if the server is blocked.
 - Switch to `AutoShardedBot` as the bot grows. Discord requires verification at 100 servers.
 
 ### Configuration (`pydantic-settings`)
@@ -232,14 +418,20 @@ All commands live under a `/github` group, gated with `default_member_permission
 - `GITHUB_TOKEN`
 - `DATABASE_URL`
 - `LOGFIRE_TOKEN`
-- `MAX_SUBS_PER_GUILD`
+- `MAX_REPOS_PER_GUILD` (default 25)
+- `MAX_SUBS_PER_GUILD` (default 100)
+- `MAX_BRANCHES_PER_SUB` (default 5)
+- `OWNER_IDS` (Discord user IDs allowed to run owner commands)
+- `DEV_GUILD_ID` (the private server owner commands are registered in)
+- `DEV_SYNC` (default false; when true, `/github` is also synced to `DEV_GUILD_ID` for instant updates while developing. Otherwise `/github` is synced globally.)
+- `BLOCK_CONTACT_URL` (optional link shown in block notices)
 - `POLL_MIN_INTERVAL`
 - `POLL_MAX_INTERVAL`
 - `POLL_CONCURRENCY`
 
 ### Observability (Logfire)
 
-- Call `logfire.configure(service_name="repowatch")` at startup.
+- Call `logfire.configure(service_name="repodrop")` at startup.
 - Call `logfire.instrument_httpx()` so every GitHub request gets a span with status and latency.
 - Call `logfire.instrument_asyncpg()` or `logfire.instrument_sqlalchemy()` for query spans.
 - Route discord.py's stdlib logging into Logfire with `logfire.LogfireLoggingHandler`.
@@ -257,19 +449,20 @@ All commands live under a `/github` group, gated with `default_member_permission
 ## 11. Project Layout
 
 ```
-repowatch/
+repodrop/
 ├── pyproject.toml
 ├── alembic.ini
 ├── alembic/
 │   └── versions/
-└── src/repowatch/
+└── src/repodrop/
     ├── __main__.py          # entrypoint: configure logfire, start bot + tasks
     ├── config.py            # pydantic-settings
     ├── observability.py     # logfire setup, custom metrics
+    ├── guild_settings.py    # effective settings + in-memory cache
     ├── db/
     │   ├── models.py        # SQLAlchemy models
     │   ├── session.py       # engine / async session factory
-    │   └── queries.py       # subscription, watch, delivery queries
+    │   └── queries.py       # subscription, watch, delivery, settings queries
     ├── github/
     │   ├── client.py        # httpx client, ETag handling, rate-limit tracking
     │   └── schemas.py       # Pydantic models for API responses
@@ -278,22 +471,28 @@ repowatch/
     │   └── detectors.py     # release / tag / commit diffing
     ├── announcer/
     │   ├── dispatcher.py    # claim + send + retry
-    │   └── embeds.py        # embed builders per event kind
+    │   └── embeds.py        # embed + link-button builders (shared with /github latest)
     └── bot/
         ├── client.py        # bot subclass, setup_hook starts tasks
+        ├── checks.py        # is_manager, can_subscribe, blocked interaction_check
         └── cogs/
-            └── subscriptions.py
+            ├── subscriptions.py # subscribe / unsubscribe / list / test
+            ├── lookup.py        # /github latest
+            ├── status.py        # /github status, admin notices
+            ├── settings.py      # /github settings panel
+            └── owner.py         # /owner commands (dev server only)
 ```
 
 ## 12. Build Phases
 
 1. **Foundation:** config, Logfire setup, SQLAlchemy models, first Alembic migration, and bot skeleton.
-2. **Subscriptions:** `/github subscribe`, `/github unsubscribe`, `/github list`, repo validation, per-guild limits, and guild-leave cleanup.
+2. **Subscriptions:** `/github subscribe` (create and update), `/github unsubscribe`, `/github list`, repo validation, the `guild_settings` table, distinct-repo and total limits, manager and blocked checks, and guild-leave cleanup.
 3. **Release polling:** GitHub client with ETags, the release detector, baselining, and event and delivery creation.
-4. **Announcer:** the outbox dispatcher, release embeds, retries, and handling of lost permissions.
-5. **More event kinds:** tags, commits (batched), and the prerelease option.
-6. **Hardening:** adaptive intervals, rate-limit backoff, orphan repo cleanup, metrics, and `/github test`.
-7. **Public launch:** bot listing, an invite link with minimal permissions (View Channel, Send Messages, Embed Links), and verification.
+4. **Announcer:** the outbox dispatcher, release embeds with link buttons, retries, handling of lost permissions, and `/github latest`.
+5. **More event kinds:** tags, commits (batched, multi-branch, with default-branch tracking and deleted-branch handling), and the prerelease option.
+6. **Server settings:** the `/github settings` panel, embed styles, `/github latest` access rules, the settings cache, and `/owner` commands.
+7. **Hardening:** adaptive intervals, rate-limit backoff, missing-repo handling, orphan repo cleanup, metrics, `/github test`, `/github status`, and admin notices.
+8. **Public launch:** bot listing, an invite link with minimal permissions (View Channel, Send Messages, Embed Links), and verification.
 
 ## 13. Future Work
 

@@ -12,7 +12,16 @@ from sqlalchemy import BigInteger, cast, delete, func, literal, or_, select, tex
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from repodrop.db.models import Delivery, DeliveryStatus, Event, Kind, Repo, RepoWatch, Subscription
+from repodrop.db.models import (
+    Delivery,
+    DeliveryStatus,
+    Event,
+    GuildSettings,
+    Kind,
+    Repo,
+    RepoWatch,
+    Subscription,
+)
 
 # --------------------------------------------------------------------------- repos
 
@@ -51,9 +60,37 @@ async def update_repo_metadata(
 # --------------------------------------------------------------------------- subscriptions
 
 
-async def count_active_guild_subscriptions(session: AsyncSession, guild_id: int) -> int:
-    stmt = select(func.count()).where(Subscription.guild_id == guild_id, Subscription.active)
-    return (await session.scalar(stmt)) or 0
+@dataclass(frozen=True, slots=True)
+class GuildUsage:
+    repos: int  # distinct repos across the server's subscriptions
+    subscriptions: int  # (channel, repo) pairs
+
+
+async def guild_usage(session: AsyncSession, guild_id: int) -> GuildUsage:
+    """Usage against the server's caps. Disabled subscriptions count too."""
+    row = (
+        await session.execute(
+            select(func.count(Subscription.repo_id.distinct()), func.count()).where(
+                Subscription.guild_id == guild_id
+            )
+        )
+    ).one()
+    return GuildUsage(repos=row[0], subscriptions=row[1])
+
+
+async def lock_guild(session: AsyncSession, guild_id: int) -> None:
+    """Take a transaction-scoped advisory lock for a server (released on commit/rollback)."""
+    await session.execute(select(func.pg_advisory_xact_lock(guild_id)))
+
+
+async def guild_follows_repo(session: AsyncSession, guild_id: int, repo_id: int) -> bool:
+    """Whether any channel in the server already subscribes to this repo."""
+    stmt = select(
+        select(Subscription.id)
+        .where(Subscription.guild_id == guild_id, Subscription.repo_id == repo_id)
+        .exists()
+    )
+    return bool(await session.scalar(stmt))
 
 
 async def get_subscription(
@@ -81,7 +118,7 @@ async def upsert_subscription(
 ) -> tuple[Subscription, bool]:
     """Create the subscription, or overwrite the settings of an existing one.
 
-    Returns `(subscription, created)`.
+    Returns `(subscription, created)`. Callers check who may update an existing one.
     """
     existing = await get_subscription(
         session, guild_id=guild_id, channel_id=channel_id, repo_id=repo_id
@@ -138,8 +175,14 @@ async def find_subscription_by_repo_name(
 
 
 async def search_guild_repo_names(
-    session: AsyncSession, guild_id: int, query: str, limit: int = 25
+    session: AsyncSession,
+    guild_id: int,
+    query: str,
+    *,
+    created_by: int | None = None,
+    limit: int = 25,
 ) -> list[str]:
+    """Repo names subscribed in this server, optionally only subscriptions `created_by` made."""
     stmt = (
         select(Repo.full_name)
         .join(Subscription, Subscription.repo_id == Repo.id)
@@ -148,6 +191,8 @@ async def search_guild_repo_names(
         .order_by(Repo.full_name)
         .limit(limit)
     )
+    if created_by is not None:
+        stmt = stmt.where(Subscription.created_by == created_by)
     return list(await session.scalars(stmt))
 
 
@@ -196,6 +241,30 @@ async def prune_orphans(session: AsyncSession) -> tuple[int, int]:
         )
     )
     return watches.rowcount, repos.rowcount  # type: ignore[attr-defined]
+
+
+# --------------------------------------------------------------------------- guild settings
+
+
+async def get_guild_settings(session: AsyncSession, guild_id: int) -> GuildSettings | None:
+    return await session.get(GuildSettings, guild_id)
+
+
+async def upsert_guild_settings(session: AsyncSession, guild_id: int, **values: Any) -> None:
+    """Set the given columns for a server, creating its row if needed."""
+    values["updated_at"] = func.now()
+    await session.execute(
+        insert(GuildSettings)
+        .values(guild_id=guild_id, **values)
+        .on_conflict_do_update(index_elements=[GuildSettings.guild_id], set_=values)
+    )
+
+
+async def delete_guild_settings_unless_blocked(session: AsyncSession, guild_id: int) -> None:
+    """Blocked rows are kept so re-inviting the bot doesn't escape the block."""
+    await session.execute(
+        delete(GuildSettings).where(GuildSettings.guild_id == guild_id, ~GuildSettings.blocked)
+    )
 
 
 # --------------------------------------------------------------------------- watches

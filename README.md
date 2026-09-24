@@ -24,14 +24,19 @@ uv run repodrop              # start the bot, poller, and announcer
 
 ## Commands
 
-All under `/github`, visible to members with **Manage Server**, with ephemeral replies:
+All under `/github`, with ephemeral replies. The group is visible to everyone; access is checked per command:
+
+- A **manager** has Manage Server, or the server's manager role if one is set.
+- **Subscribing** is open to everyone unless the server sets a subscriber role (managers always can).
+- A subscription can be changed or removed by the member who added it, or a manager.
+
 
 | Command | What it does |
 |---|---|
-| `/github subscribe repo [events] [channel] [prereleases] [branch]` | Start announcing a repo. Running it again for the same channel updates the settings. |
-| `/github unsubscribe repo [channel]` | Stop announcing a repo in a channel. |
+| `/github subscribe repo [events] [channel] [prereleases] [branch]` | Start announcing a repo. Running it again for the same channel updates the settings. You need to be able to post in the target channel yourself (managers excepted). |
+| `/github unsubscribe repo [channel]` | Stop announcing a repo in a channel. Your own subscriptions, or any as a manager. |
 | `/github list [channel]` | Show this server's subscriptions. |
-| `/github test repo [channel]` | Post the repo's latest release to check formatting and permissions. |
+| `/github test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. |
 
 ## Development
 
