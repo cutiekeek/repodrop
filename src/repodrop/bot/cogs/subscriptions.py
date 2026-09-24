@@ -1,4 +1,4 @@
-"""`/github` slash commands: subscribe, unsubscribe, list, status, latest, test."""
+"""`/github` slash commands: subscribe, unsubscribe, list, status, latest, settings, test."""
 
 import asyncio
 import time
@@ -21,6 +21,8 @@ from repodrop.bot.checks import (
     settings_for,
     subscriber_only,
 )
+from repodrop.bot.errors import UserError, reply_with_error
+from repodrop.bot.settings_panel import SettingsPanel
 from repodrop.db import queries
 from repodrop.db.models import Kind, LatestAccess, Subscription
 from repodrop.db.queries import WatchKey
@@ -55,10 +57,6 @@ REQUIRED_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True
 MEMBER_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True)
 # /github latest results are cached per repo so repeated lookups don't spend GitHub's rate limit.
 LATEST_CACHE_TTL = 300
-
-
-class UserError(Exception):
-    """Shown to the invoking user as-is."""
 
 
 # No default_permissions: Discord can't gate subcommands individually, so the group is visible to
@@ -460,6 +458,28 @@ class SubscriptionsCog(
         self._latest_cache[cache_key] = (time.monotonic(), kind, payload)
         return kind, payload
 
+    # ------------------------------------------------------------------ /github settings
+
+    @app_commands.command(name="settings", description="Change RepoDrop's settings for this server")
+    @manager_only()
+    async def settings_panel(self, interaction: discord.Interaction) -> None:
+        assert interaction.guild is not None
+        member = interaction.user
+        assert isinstance(member, discord.Member)
+        settings = await settings_for(interaction)
+        async with self.bot.sessions() as session:
+            usage = await queries.guild_usage(session, interaction.guild.id)
+        panel = SettingsPanel(
+            self.bot.guild_settings,
+            settings,
+            owner_id=member.id,
+            # Managers via the manager role can't grant or remove manager access.
+            can_change_manager_role=member.guild_permissions.manage_guild,
+            usage_text=usage_line(usage, settings),
+        )
+        await interaction.response.send_message(embed=panel.embed(), view=panel, ephemeral=True)
+        panel.origin = interaction
+
     # ------------------------------------------------------------------ /github test
 
     @app_commands.command(
@@ -605,22 +625,7 @@ class SubscriptionsCog(
     async def cog_app_command_error(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
-        original = getattr(error, "original", error)
-        if isinstance(original, UserError | AccessDenied):
-            message = str(original)
-        elif isinstance(original, app_commands.CommandOnCooldown):
-            message = f"Slow down a little. Try again in {original.retry_after:.0f} seconds."
-        else:
-            logfire.exception(
-                "command {command} failed",
-                command=getattr(interaction.command, "qualified_name", None),
-                _exc_info=original,
-            )
-            message = "Something went wrong on my end. Please try again."
-        if interaction.response.is_done():
-            await interaction.followup.send(message, ephemeral=True)
-        else:
-            await interaction.response.send_message(message, ephemeral=True)
+        await reply_with_error(interaction, error)
 
 
 def _presentation_of(settings: EffectiveSettings) -> Presentation:

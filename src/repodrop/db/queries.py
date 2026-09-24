@@ -727,6 +727,56 @@ async def schedule_delivery_retry(
     )
 
 
+async def skip_guild_pending_deliveries(session: AsyncSession, guild_id: int, reason: str) -> int:
+    """Mark every pending delivery for a server's subscriptions `skipped` (e.g. when blocked)."""
+    result = await session.execute(
+        update(Delivery)
+        .where(
+            Delivery.subscription_id == Subscription.id,
+            Subscription.guild_id == guild_id,
+            Delivery.status == DeliveryStatus.PENDING,
+        )
+        .values(status=DeliveryStatus.SKIPPED, last_error=reason)
+    )
+    return result.rowcount  # type: ignore[attr-defined]
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryFailure:
+    repo_full_name: str
+    channel_id: int
+    status: str
+    error: str | None
+    event_kind: str
+    detected_at: datetime
+
+
+async def recent_delivery_failures(
+    session: AsyncSession, guild_id: int, limit: int = 5
+) -> list[DeliveryFailure]:
+    """The server's latest failed or skipped deliveries, newest first."""
+    rows = await session.execute(
+        select(
+            Repo.full_name,
+            Subscription.channel_id,
+            Delivery.status,
+            Delivery.last_error,
+            Event.kind,
+            Event.detected_at,
+        )
+        .join(Subscription, Subscription.id == Delivery.subscription_id)
+        .join(Event, Event.id == Delivery.event_id)
+        .join(Repo, Repo.id == Event.repo_id)
+        .where(
+            Subscription.guild_id == guild_id,
+            Delivery.status.in_([DeliveryStatus.FAILED, DeliveryStatus.SKIPPED]),
+        )
+        .order_by(Delivery.id.desc())
+        .limit(limit)
+    )
+    return [DeliveryFailure(*r) for r in rows.tuples()]
+
+
 async def pending_delivery_count(session: AsyncSession) -> int:
     stmt = select(func.count()).where(Delivery.status == DeliveryStatus.PENDING)
     return (await session.scalar(stmt)) or 0

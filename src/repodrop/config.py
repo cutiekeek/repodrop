@@ -32,8 +32,11 @@ class Settings(DatabaseSettings):
     logfire_token: SecretStr | None = None
     environment: str = "development"
 
-    # If set, slash commands are synced to this guild only (instant updates while developing).
+    # The operator's private server: /owner commands are registered only there.
     dev_guild_id: int | None = None
+    # Also register /github in DEV_GUILD_ID (instant updates while developing) instead of
+    # globally. Leave off in production so every server gets /github.
+    dev_sync: bool = False
 
     # Default per-server caps; the operator can override them per server (guild_settings).
     max_repos_per_guild: int = 25  # distinct repos

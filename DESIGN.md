@@ -331,7 +331,7 @@ The poller can't post to Discord (§6 layering rule), so notices go through the 
 
 ### 8.7 `/github settings`
 
-`/github settings` opens an ephemeral panel (a `discord.ui.View`) for managers. Each change saves immediately and re-renders the panel. The view times out after about 5 minutes.
+`/github settings` opens an ephemeral panel (a `discord.ui.View`) for managers. Discord allows 5 component rows per message, so the two `/github latest` settings share one select with four combined choices. Each change saves immediately and re-renders the panel. The view times out after about 5 minutes.
 
 | Control | Component | Setting |
 |---|---|---|
@@ -339,8 +339,7 @@ The poller can't post to Discord (§6 layering rule), so notices go through the 
 | Subscriber role | Role select (with a "clear" option) | `subscriber_role_id`. When set, only members with this role (plus managers) can subscribe. Clearing it opens subscribing to everyone again. |
 | Default channel | Channel select (text and announcement channels) | `default_channel_id` |
 | Embed style | Select: Full / Compact | `embed_style` |
-| Who can use `/github latest` | Select: Everyone / Managers only | `latest_access` |
-| Allow public `/github latest` | Toggle button | `latest_allow_public` |
+| `/github latest` | Select: Anyone or Managers only, each with public posts allowed or private replies only | `latest_access`, `latest_allow_public` |
 
 The panel also shows the operator-controlled values read-only: repo and subscription usage against their caps, and whether commit subscriptions are allowed.
 

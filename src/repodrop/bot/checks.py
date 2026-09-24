@@ -98,3 +98,8 @@ def _manager_message(settings: EffectiveSettings) -> str:
             "use this."
         )
     return "Only members with Manage Server can use this."
+
+
+def is_owner(user_id: int, owner_ids: list[int]) -> bool:
+    """Operator commands: the invoker must be listed in OWNER_IDS (empty = nobody)."""
+    return user_id in owner_ids

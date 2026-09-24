@@ -5,6 +5,7 @@ import logfire
 from discord.ext import commands
 
 from repodrop.announcer.dispatcher import Dispatcher
+from repodrop.bot.cogs.owner import OwnerCog
 from repodrop.bot.cogs.subscriptions import SubscriptionsCog
 from repodrop.config import Settings
 from repodrop.db import queries
@@ -38,6 +39,13 @@ class RepoDropBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         await self.add_cog(SubscriptionsCog(self))
+        if self.settings.dev_guild_id:
+            # Operator commands exist only in the operator's own server.
+            await self.add_cog(OwnerCog(self), guild=discord.Object(self.settings.dev_guild_id))
+        else:
+            logfire.warn("DEV_GUILD_ID isn't set, so /owner commands aren't registered")
+        if not self.settings.owner_ids:
+            logfire.warn("OWNER_IDS is empty, so nobody can run /owner commands")
         self._background = [
             asyncio.create_task(self.poller.run(), name="poller"),
             asyncio.create_task(self.poller.run_maintenance(), name="maintenance"),
@@ -48,22 +56,34 @@ class RepoDropBot(commands.Bot):
         await self._sync_commands()
 
     async def _sync_commands(self) -> None:
+        """Register /github globally and /owner in the operator's server.
+
+        With DEV_SYNC, /github is registered in DEV_GUILD_ID instead of globally, for instant
+        updates while developing.
+        """
+        dev_guild = (
+            discord.Object(self.settings.dev_guild_id) if self.settings.dev_guild_id else None
+        )
+        if self.settings.dev_sync and dev_guild is not None:
+            self.tree.copy_global_to(guild=dev_guild)
+        else:
+            synced = await self.tree.sync()
+            logfire.info("synced {count} global commands", count=len(synced))
+        if dev_guild is None:
+            return
         try:
-            if self.settings.dev_guild_id:
-                guild = discord.Object(id=self.settings.dev_guild_id)
-                self.tree.copy_global_to(guild=guild)
-                synced = await self.tree.sync(guild=guild)
-            else:
-                synced = await self.tree.sync()
+            synced = await self.tree.sync(guild=dev_guild)
         except discord.Forbidden:
             # Keep running (polling and announcing still work); commands just aren't registered.
             logfire.error(
-                "could not register slash commands in guild {guild_id}: the bot isn't in that "
+                "could not register commands in guild {guild_id}: the bot isn't in that "
                 "server, or was invited without the applications.commands scope",
-                guild_id=self.settings.dev_guild_id,
+                guild_id=dev_guild.id,
             )
             return
-        logfire.info("synced {count} application commands", count=len(synced))
+        logfire.info(
+            "synced {count} commands in guild {guild_id}", count=len(synced), guild_id=dev_guild.id
+        )
 
     async def on_ready(self) -> None:
         logfire.info(
