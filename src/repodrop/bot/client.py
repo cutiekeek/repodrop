@@ -8,6 +8,7 @@ from discord.ext import commands
 from repodrop.announcer.dispatcher import Dispatcher
 from repodrop.bot.cogs.owner import OwnerCog
 from repodrop.bot.cogs.subscriptions import SubscriptionsCog
+from repodrop.bot.welcome import pick_welcome_channel, welcome_message
 from repodrop.config import Settings
 from repodrop.db import queries
 from repodrop.db.session import create_engine, create_session_factory
@@ -129,6 +130,39 @@ class RepoDropBot(commands.Bot):
             guild_name=guild.name,
             member_count=guild.member_count,
             blocked=settings.blocked,
+        )
+        if not settings.blocked:
+            await self._welcome(guild)
+
+    async def _welcome(self, guild: discord.Guild) -> None:
+        """Post the getting-started message once, where the bot is allowed to."""
+        channel = pick_welcome_channel(guild)
+        if channel is None:
+            logfire.info(
+                "no channel to post the welcome message in guild {guild_id}", guild_id=guild.id
+            )
+            return
+        embed, view = welcome_message(
+            await self.guild_settings.get(guild.id), self.settings.docs_url
+        )
+        try:
+            await channel.send(
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions.none(),
+                **({"view": view} if view is not None else {}),
+            )
+        except discord.HTTPException as exc:
+            logfire.warn(
+                "couldn't post the welcome message in guild {guild_id}: {error}",
+                guild_id=guild.id,
+                channel_id=channel.id,
+                error=str(exc),
+            )
+            return
+        logfire.info(
+            "posted the welcome message in guild {guild_id}",
+            guild_id=guild.id,
+            channel_id=channel.id,
         )
 
     async def on_ready(self) -> None:

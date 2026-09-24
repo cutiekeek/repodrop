@@ -47,6 +47,8 @@ class Settings(DatabaseSettings):
     owner_ids: Annotated[list[int], NoDecode] = []
     # Optional link shown in the notice a blocked server sees.
     block_contact_url: str | None = None
+    # "Getting started" link in the welcome message posted when the bot joins a server.
+    docs_url: str | None = "https://github.com/cutiekeek/repodrop#getting-started"
 
     # Effective per-server settings are cached this long; writes through the bot invalidate
     # immediately, so this only bounds how long a direct database edit takes to be seen.

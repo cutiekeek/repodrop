@@ -16,6 +16,8 @@ You need the **Manage Server** permission in a server to add a bot to it. RepoDr
 
 It can't read your messages. It uses slash commands only, with no message-content access.
 
+When it joins, RepoDrop posts a short getting-started message in your server's system channel (or the first channel it can post in).
+
 ## Getting started
 
 1. In the channel where announcements should appear, run:
