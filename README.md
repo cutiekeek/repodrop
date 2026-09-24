@@ -36,7 +36,10 @@ All under `/github`, with ephemeral replies. The group is visible to everyone; a
 | `/github subscribe repo [channel] [releases] [tags] [commits] [branches] [prereleases]` | Start announcing a repo (releases by default). Running it again for the same repo and channel updates it, changing only the options you pass: `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` sets the commit branches, `branches:default` follows the default branch. You need to be able to post in the target channel yourself (managers excepted). |
 | `/github unsubscribe repo [channel]` | Stop announcing a repo in a channel. Your own subscriptions, or any as a manager. |
 | `/github list [channel]` | Show this server's subscriptions. |
+| `/github status [channel]` | Health report: what each subscription posts, when it last posted and was checked, and any problems (missing permissions, deleted branches, disabled subscriptions). Managers only. |
 | `/github test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. |
+
+When a subscription is disabled automatically (the channel was deleted, the bot lost permission, or the repo was deleted or made private), or a followed branch is deleted, the bot posts one notice in the server's system channel if it can.
 
 ## Development
 

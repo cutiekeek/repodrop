@@ -44,6 +44,8 @@ class Repo(Base):
     github_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     full_name: Mapped[str] = mapped_column(Text)  # display only; refreshed on poll
     default_branch: Mapped[str] = mapped_column(Text)
+    metadata_etag: Mapped[str | None] = mapped_column(Text)  # for the daily metadata refresh
+    metadata_checked_at: Mapped[datetime | None] = mapped_column()
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
 
@@ -62,7 +64,11 @@ class RepoWatch(Base):
     # NULL means the watch has not been baselined yet.
     last_seen_id: Mapped[str | None] = mapped_column(Text)
     poll_interval: Mapped[timedelta] = mapped_column(Interval, server_default=text("'10 minutes'"))
+    # 'infinity' means stopped (e.g. the branch was deleted); re-subscribing resets it.
     next_poll_at: Mapped[datetime] = mapped_column(server_default=func.now(), index=True)
+    last_polled_at: Mapped[datetime | None] = mapped_column()  # shown by /github status
+    last_error: Mapped[str | None] = mapped_column(Text)  # cleared by the next successful poll
+    notified_at: Mapped[datetime | None] = mapped_column()  # admin notice sent for a stop
 
 
 class Subscription(Base):
@@ -86,6 +92,7 @@ class Subscription(Base):
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     disabled_reason: Mapped[str | None] = mapped_column(Text)  # set when auto-disabled
     disabled_at: Mapped[datetime | None] = mapped_column()
+    notified_at: Mapped[datetime | None] = mapped_column()  # admin notice sent for this disable
     created_by: Mapped[int] = mapped_column(BigInteger)  # Discord user ID
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
@@ -115,6 +122,12 @@ class Delivery(Base):
             "next_attempt_at",
             postgresql_where=text("status = 'pending'"),
         ),
+        Index(
+            "ix_deliveries_subscription_id_sent_at_sent",
+            "subscription_id",
+            text("sent_at DESC"),
+            postgresql_where=text("status = 'sent'"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -126,6 +139,7 @@ class Delivery(Base):
     attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     next_attempt_at: Mapped[datetime] = mapped_column(server_default=func.now())
     message_id: Mapped[int | None] = mapped_column(BigInteger)
+    sent_at: Mapped[datetime | None] = mapped_column()
     last_error: Mapped[str | None] = mapped_column(Text)
 
 

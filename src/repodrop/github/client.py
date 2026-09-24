@@ -86,6 +86,18 @@ class GitHubClient:
         resp = await self._get(f"/repositories/{github_id}")
         return Repository.model_validate_json(resp.content)
 
+    async def repo_metadata(
+        self, github_id: int, *, etag: str | None = None
+    ) -> Conditional[Repository]:
+        """Conditional lookup by numeric ID, which survives renames and transfers."""
+        headers = {"If-None-Match": etag} if etag else {}
+        resp = await self._get(f"/repositories/{github_id}", headers=headers)
+        if resp.status_code == 304:
+            return Conditional(items=None, etag=etag)
+        return Conditional(
+            items=Repository.model_validate_json(resp.content), etag=resp.headers.get("ETag")
+        )
+
     async def branch_exists(self, full_name: str, branch: str) -> bool:
         try:
             await self._get(f"/repos/{full_name}/branches/{quote(branch, safe='')}")

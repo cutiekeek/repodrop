@@ -65,6 +65,8 @@ class Settings(DatabaseSettings):
     delivery_max_attempts: int = 5
 
     maintenance_interval: timedelta = timedelta(hours=1)
+    # How often each repo's metadata (name, default branch) is re-checked.
+    metadata_refresh_interval: timedelta = timedelta(days=1)
 
     @field_validator(
         "poll_min_interval",
@@ -74,6 +76,7 @@ class Settings(DatabaseSettings):
         "announcer_sweep_interval",
         "maintenance_interval",
         "guild_settings_cache_ttl",
+        "metadata_refresh_interval",
         mode="before",
     )
     @classmethod

@@ -8,7 +8,18 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import BigInteger, cast, delete, func, literal, or_, select, text, update
+from sqlalchemy import (
+    BigInteger,
+    cast,
+    delete,
+    func,
+    literal,
+    literal_column,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +33,9 @@ from repodrop.db.models import (
     RepoWatch,
     Subscription,
 )
+
+# A stopped watch (e.g. its branch was deleted) is never due. Re-subscribing resets it.
+INFINITY = literal_column("'infinity'::timestamptz")
 
 # --------------------------------------------------------------------------- repos
 
@@ -47,14 +61,38 @@ async def get_repos(session: AsyncSession, repo_ids: Sequence[int]) -> dict[int,
     return {r.id: r for r in repos}
 
 
-async def update_repo_metadata(
-    session: AsyncSession, repo_id: int, *, full_name: str, default_branch: str
-) -> None:
-    await session.execute(
-        update(Repo)
-        .where(Repo.id == repo_id)
-        .values(full_name=full_name, default_branch=default_branch)
+async def repos_due_for_metadata(
+    session: AsyncSession, *, older_than: timedelta, limit: int
+) -> list[Repo]:
+    stmt = (
+        select(Repo)
+        .where(
+            or_(
+                Repo.metadata_checked_at.is_(None),
+                Repo.metadata_checked_at < func.now() - older_than,
+            )
+        )
+        .order_by(Repo.metadata_checked_at.asc().nulls_first())
+        .limit(limit)
     )
+    return list(await session.scalars(stmt))
+
+
+async def record_repo_metadata(
+    session: AsyncSession,
+    repo_id: int,
+    *,
+    etag: str | None,
+    full_name: str | None = None,
+    default_branch: str | None = None,
+) -> None:
+    """Record a metadata check; name and default branch are updated when given."""
+    values: dict[str, Any] = {"metadata_etag": etag, "metadata_checked_at": func.now()}
+    if full_name is not None:
+        values["full_name"] = full_name
+    if default_branch is not None:
+        values["default_branch"] = default_branch
+    await session.execute(update(Repo).where(Repo.id == repo_id).values(**values))
 
 
 # --------------------------------------------------------------------------- subscriptions
@@ -208,10 +246,26 @@ async def delete_guild_subscriptions(session: AsyncSession, guild_id: int) -> in
     return result.rowcount  # type: ignore[attr-defined]
 
 
-async def deactivate_subscription(session: AsyncSession, subscription_id: int) -> None:
+_DISABLE = {"active": False, "disabled_at": func.now(), "notified_at": None}
+
+
+async def deactivate_subscription(session: AsyncSession, subscription_id: int, reason: str) -> None:
+    """Auto-disable a subscription; the announcer sends one admin notice for it."""
     await session.execute(
-        update(Subscription).where(Subscription.id == subscription_id).values(active=False)
+        update(Subscription)
+        .where(Subscription.id == subscription_id, Subscription.active)
+        .values(disabled_reason=reason, **_DISABLE)
     )
+
+
+async def disable_repo_subscriptions(session: AsyncSession, repo_id: int, reason: str) -> int:
+    """Auto-disable every active subscription to a repo (e.g. it was deleted or made private)."""
+    result = await session.execute(
+        update(Subscription)
+        .where(Subscription.repo_id == repo_id, Subscription.active)
+        .values(disabled_reason=reason, **_DISABLE)
+    )
+    return result.rowcount  # type: ignore[attr-defined]
 
 
 async def prune_orphans(session: AsyncSession) -> tuple[int, int]:
@@ -295,17 +349,28 @@ class ClaimedWatch:
 async def ensure_watch(
     session: AsyncSession, key: WatchKey, *, initial_interval: timedelta
 ) -> None:
+    """Create the watch if missing, or restart it if it was stopped.
+
+    A restarted watch is baselined again, so nothing from while it was stopped is announced.
+    """
+    fresh = {
+        "poll_interval": initial_interval,
+        # Give the subscribe flow a chance to baseline before the poller picks it up.
+        "next_poll_at": func.now() + initial_interval,
+    }
+    stmt = insert(RepoWatch).values(repo_id=key.repo_id, kind=key.kind, branch=key.branch, **fresh)
     await session.execute(
-        insert(RepoWatch)
-        .values(
-            repo_id=key.repo_id,
-            kind=key.kind,
-            branch=key.branch,
-            poll_interval=initial_interval,
-            # Give the subscribe flow a chance to baseline before the poller picks it up.
-            next_poll_at=func.now() + initial_interval,
+        stmt.on_conflict_do_update(
+            index_elements=[RepoWatch.repo_id, RepoWatch.kind, RepoWatch.branch],
+            set_={
+                **fresh,
+                "etag": None,
+                "last_seen_id": None,
+                "last_error": None,
+                "notified_at": None,
+            },
+            where=RepoWatch.next_poll_at == INFINITY,
         )
-        .on_conflict_do_nothing()
     )
 
 
@@ -387,20 +452,83 @@ async def update_watch(
             last_seen_id=last_seen_id,
             poll_interval=poll_interval,
             next_poll_at=next_poll_at,
+            last_polled_at=func.now(),
+            last_error=None,
         )
     )
 
 
-async def reschedule_watch(session: AsyncSession, key: WatchKey, next_poll_at: datetime) -> None:
+def _watch_is(key: WatchKey) -> Any:
+    return (
+        (RepoWatch.repo_id == key.repo_id)
+        & (RepoWatch.kind == key.kind)
+        & (RepoWatch.branch == key.branch)
+    )
+
+
+async def reschedule_watch(
+    session: AsyncSession, key: WatchKey, next_poll_at: datetime, *, error: str
+) -> None:
+    """Record a failed poll and when to try again."""
     await session.execute(
         update(RepoWatch)
-        .where(
-            RepoWatch.repo_id == key.repo_id,
-            RepoWatch.kind == key.kind,
-            RepoWatch.branch == key.branch,
-        )
-        .values(next_poll_at=next_poll_at)
+        .where(_watch_is(key))
+        .values(next_poll_at=next_poll_at, last_polled_at=func.now(), last_error=error)
     )
+
+
+async def stop_watch(session: AsyncSession, key: WatchKey, error: str) -> None:
+    """Stop polling a watch (e.g. its branch was deleted); the announcer sends one notice."""
+    await session.execute(
+        update(RepoWatch)
+        .where(_watch_is(key))
+        .values(
+            next_poll_at=INFINITY, last_polled_at=func.now(), last_error=error, notified_at=None
+        )
+    )
+
+
+async def stop_repo_watches(session: AsyncSession, repo_id: int, error: str) -> None:
+    """Stop every watch of a repo that's gone. Its subscriptions' disable notices cover it."""
+    await session.execute(
+        update(RepoWatch)
+        .where(RepoWatch.repo_id == repo_id)
+        .values(
+            next_poll_at=INFINITY,
+            last_polled_at=func.now(),
+            last_error=error,
+            notified_at=func.now(),
+        )
+    )
+
+
+async def ensure_default_branch_watch(
+    session: AsyncSession, repo_id: int, default_branch: str, *, initial_interval: timedelta
+) -> bool:
+    """After a default-branch change, give subscriptions following it a watch on the new one.
+
+    Returns whether any subscription needed it. The old branch's watch is left for
+    `prune_orphans` to remove if nothing else lists it.
+    """
+    follows_default = await session.scalar(
+        select(
+            select(Subscription.id)
+            .where(
+                Subscription.repo_id == repo_id,
+                Subscription.active,
+                Subscription.kinds.any_() == Kind.COMMIT,
+                func.cardinality(Subscription.branches) == 0,
+            )
+            .exists()
+        )
+    )
+    if follows_default:
+        await ensure_watch(
+            session,
+            WatchKey(repo_id, Kind.COMMIT, default_branch),
+            initial_interval=initial_interval,
+        )
+    return bool(follows_default)
 
 
 # --------------------------------------------------------------------------- events
@@ -567,7 +695,9 @@ async def mark_delivery_sent(session: AsyncSession, delivery_id: int, message_id
     await session.execute(
         update(Delivery)
         .where(Delivery.id == delivery_id)
-        .values(status=DeliveryStatus.SENT, message_id=message_id, last_error=None)
+        .values(
+            status=DeliveryStatus.SENT, message_id=message_id, sent_at=func.now(), last_error=None
+        )
     )
 
 
@@ -600,6 +730,142 @@ async def schedule_delivery_retry(
 async def pending_delivery_count(session: AsyncSession) -> int:
     stmt = select(func.count()).where(Delivery.status == DeliveryStatus.PENDING)
     return (await session.scalar(stmt)) or 0
+
+
+# --------------------------------------------------------------------------- admin notices
+
+
+@dataclass(frozen=True, slots=True)
+class DisableNotice:
+    subscription_id: int
+    guild_id: int
+    channel_id: int
+    repo_full_name: str
+    reason: str
+
+
+async def pending_disable_notices(session: AsyncSession, limit: int = 500) -> list[DisableNotice]:
+    rows = await session.execute(
+        select(
+            Subscription.id,
+            Subscription.guild_id,
+            Subscription.channel_id,
+            Repo.full_name,
+            Subscription.disabled_reason,
+        )
+        .join(Repo, Repo.id == Subscription.repo_id)
+        .where(
+            ~Subscription.active,
+            Subscription.disabled_at.is_not(None),
+            Subscription.notified_at.is_(None),
+        )
+        .order_by(Subscription.guild_id, Subscription.id)
+        .limit(limit)
+    )
+    return [DisableNotice(r[0], r[1], r[2], r[3], r[4] or "disabled") for r in rows.tuples()]
+
+
+async def mark_subscriptions_notified(session: AsyncSession, ids: Sequence[int]) -> None:
+    if ids:
+        await session.execute(
+            update(Subscription).where(Subscription.id.in_(ids)).values(notified_at=func.now())
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BranchNotice:
+    key: WatchKey
+    repo_full_name: str
+    error: str
+    guild_id: int
+    channel_id: int
+
+
+async def pending_branch_notices(session: AsyncSession) -> list[BranchNotice]:
+    """Stopped commit watches not yet reported, one row per affected (server, channel).
+
+    A watch is shared, so one stopped branch can affect several servers.
+    """
+    rows = await session.execute(
+        select(
+            RepoWatch.repo_id,
+            RepoWatch.branch,
+            Repo.full_name,
+            RepoWatch.last_error,
+            Subscription.guild_id,
+            Subscription.channel_id,
+        )
+        .join(Repo, Repo.id == RepoWatch.repo_id)
+        .join(
+            Subscription,
+            (Subscription.repo_id == RepoWatch.repo_id)
+            & Subscription.active
+            & (Subscription.kinds.any_() == Kind.COMMIT)
+            & or_(
+                RepoWatch.branch == Subscription.branches.any_(),
+                (func.cardinality(Subscription.branches) == 0)
+                & (RepoWatch.branch == Repo.default_branch),
+            ),
+        )
+        .where(
+            RepoWatch.kind == Kind.COMMIT,
+            RepoWatch.next_poll_at == INFINITY,
+            RepoWatch.notified_at.is_(None),
+        )
+        .order_by(Subscription.guild_id, RepoWatch.repo_id, RepoWatch.branch)
+    )
+    return [
+        BranchNotice(WatchKey(r[0], Kind.COMMIT, r[1]), r[2], r[3] or "stopped", r[4], r[5])
+        for r in rows.tuples()
+    ]
+
+
+async def mark_watches_notified(session: AsyncSession, keys: Sequence[WatchKey]) -> None:
+    for key in set(keys):
+        await session.execute(
+            update(RepoWatch).where(_watch_is(key)).values(notified_at=func.now())
+        )
+
+
+# --------------------------------------------------------------------------- health
+
+
+@dataclass(slots=True)
+class SubscriptionHealthRow:
+    subscription: Subscription
+    repo: Repo
+    last_sent_at: datetime | None
+
+
+async def subscription_health(
+    session: AsyncSession, guild_id: int, channel_id: int | None = None
+) -> tuple[list[SubscriptionHealthRow], dict[int, list[RepoWatch]]]:
+    """Subscriptions with when each last posted, plus every watch of their repos by repo ID."""
+    last_sent = (
+        select(Delivery.subscription_id, func.max(Delivery.sent_at).label("last_sent_at"))
+        .where(Delivery.status == DeliveryStatus.SENT)
+        .group_by(Delivery.subscription_id)
+        .subquery()
+    )
+    stmt = (
+        select(Subscription, Repo, last_sent.c.last_sent_at)
+        .join(Repo, Repo.id == Subscription.repo_id)
+        .outerjoin(last_sent, last_sent.c.subscription_id == Subscription.id)
+        .where(Subscription.guild_id == guild_id)
+        .order_by(Subscription.channel_id, func.lower(Repo.full_name))
+    )
+    if channel_id is not None:
+        stmt = stmt.where(Subscription.channel_id == channel_id)
+    rows = [SubscriptionHealthRow(s, r, t) for s, r, t in (await session.execute(stmt)).tuples()]
+
+    watches: dict[int, list[RepoWatch]] = {}
+    repo_ids = {row.repo.id for row in rows}
+    if repo_ids:
+        for watch in await session.scalars(
+            select(RepoWatch).where(RepoWatch.repo_id.in_(repo_ids))
+        ):
+            watches.setdefault(watch.repo_id, []).append(watch)
+    return rows, watches
 
 
 def _escape_like(value: str) -> str:

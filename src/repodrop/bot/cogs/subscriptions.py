@@ -1,4 +1,4 @@
-"""`/github` slash commands: subscribe, unsubscribe, list, test."""
+"""`/github` slash commands: subscribe, unsubscribe, list, status, test."""
 
 import asyncio
 from typing import TYPE_CHECKING, Any
@@ -9,6 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from repodrop.announcer.embeds import release_embed
+from repodrop.bot import status as status_report
 from repodrop.bot.checks import (
     AccessDenied,
     blocked_notice,
@@ -342,6 +343,44 @@ class SubscriptionsCog(
         embed.set_footer(text=usage_line(usage, settings))
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    # ------------------------------------------------------------------ /github status
+
+    @app_commands.command(description="Health report for this server's subscriptions")
+    @app_commands.describe(channel="Only show subscriptions for this channel")
+    @manager_only()
+    async def status(
+        self, interaction: discord.Interaction, channel: discord.TextChannel | None = None
+    ) -> None:
+        guild = interaction.guild
+        assert guild is not None
+        async with self.bot.sessions() as session:
+            rows, watches = await queries.subscription_health(
+                session, guild.id, channel.id if channel else None
+            )
+        if not rows:
+            where = channel.mention if channel else "This server"
+            await interaction.response.send_message(
+                f"{where} has no subscriptions. Add one with `/github subscribe`.", ephemeral=True
+            )
+            return
+
+        def permission_problems(channel_id: int) -> list[str]:
+            target = guild.get_channel(channel_id)
+            if not isinstance(target, discord.TextChannel):
+                return ["The channel no longer exists"]
+            return [f"I'm missing {', '.join(m)}"] if (m := _missing(target)) else []
+
+        entries = status_report.build_entries(rows, watches, permission_problems)
+        pages = status_report.paginate(entries)
+        title = f"Subscription status · #{channel.name}" if channel else "Subscription status"
+        summary_line = status_report.summary(entries)
+        if len(pages) == 1:
+            embed = status_report.page_embed(title, summary_line, pages, 0)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        view = status_report.StatusView(title, summary_line, pages, interaction.user.id)
+        await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
+
     # ------------------------------------------------------------------ /github test
 
     @app_commands.command(
@@ -431,13 +470,7 @@ class SubscriptionsCog(
 
     @staticmethod
     def _check_bot_permissions(channel: discord.TextChannel) -> None:
-        have = channel.permissions_for(channel.guild.me)
-        missing = [
-            name.replace("_", " ").title()
-            for name, needed in REQUIRED_PERMISSIONS
-            if needed and not getattr(have, name)
-        ]
-        if missing:
+        if missing := _missing(channel):
             raise UserError(f"I'm missing {', '.join(missing)} in {channel.mention}.")
 
     @staticmethod
@@ -486,6 +519,16 @@ class SubscriptionsCog(
             await interaction.followup.send(message, ephemeral=True)
         else:
             await interaction.response.send_message(message, ephemeral=True)
+
+
+def _missing(channel: discord.TextChannel) -> list[str]:
+    """The bot's missing required permissions in a channel, as display names."""
+    have = channel.permissions_for(channel.guild.me)
+    return [
+        name.replace("_", " ").title()
+        for name, needed in REQUIRED_PERMISSIONS
+        if needed and not getattr(have, name)
+    ]
 
 
 def _state(sub: Subscription) -> SubscriptionState:

@@ -13,7 +13,7 @@ from repodrop.db import queries
 from repodrop.db.models import Delivery, Event, Repo, RepoWatch, Subscription
 from repodrop.db.queries import WatchKey
 from repodrop.github.client import Conditional, NotFoundError, RateLimit
-from repodrop.github.schemas import Release
+from repodrop.github.schemas import Release, Repository
 from repodrop.poller.scheduler import Poller
 
 GUILD, CHANNEL, USER = 111, 222, 333
@@ -244,6 +244,23 @@ def gh_release(id: int, published: datetime, *, prerelease=False) -> Release:
     )
 
 
+def gh_repo(*, full_name="octo/widget", default_branch="main", private=False) -> Repository:
+    return Repository.model_validate(
+        {
+            "id": 42,
+            "full_name": full_name,
+            "private": private,
+            "default_branch": default_branch,
+            "html_url": f"https://github.com/{full_name}",
+            "owner": {
+                "login": "octo",
+                "html_url": "https://github.com/octo",
+                "avatar_url": "https://github.com/octo.png",
+            },
+        }
+    )
+
+
 class FakeGitHub:
     def __init__(self) -> None:
         self.rate_limit = RateLimit(remaining=5000)
@@ -251,6 +268,9 @@ class FakeGitHub:
         self.etag = '"1"'
         self.error: Exception | None = None
         self.seen_etags: list[str | None] = []
+        self.repo: Repository | None = gh_repo()  # None = gone (404 by ID)
+        self.metadata_etag = '"m1"'
+        self.branches = {"main"}
 
     async def list_releases(self, full_name, *, etag=None):
         self.seen_etags.append(etag)
@@ -259,6 +279,28 @@ class FakeGitHub:
         if etag == self.etag:
             return Conditional(items=None, etag=etag)
         return Conditional(items=list(self.releases), etag=self.etag)
+
+    async def list_commits(self, full_name, branch, *, etag=None):
+        if self.error:
+            raise self.error
+        if branch not in self.branches:
+            raise NotFoundError(branch)
+        return Conditional(items=[], etag=None)
+
+    async def get_repo_by_id(self, github_id):
+        if self.repo is None:
+            raise NotFoundError("gone")
+        return self.repo
+
+    async def repo_metadata(self, github_id, *, etag=None):
+        if self.repo is None:
+            raise NotFoundError("gone")
+        if etag == self.metadata_etag:
+            return Conditional(items=None, etag=etag)
+        return Conditional(items=self.repo, etag=self.metadata_etag)
+
+    async def branch_exists(self, full_name, branch):
+        return branch in self.branches
 
 
 async def test_poller_baseline_detect_and_not_modified(sessions):
@@ -310,19 +352,143 @@ async def test_poller_baseline_detect_and_not_modified(sessions):
         assert watch.poll_interval == timedelta(minutes=5)  # changed: poll faster
 
 
-async def test_poller_backs_off_on_404(sessions):
+async def due_watch(sessions, key: WatchKey, last_seen="x") -> None:
+    async with sessions.begin() as s:
+        await queries.ensure_watch(s, key, initial_interval=TEN_MIN)
+        await s.execute(
+            update(RepoWatch)
+            .where(
+                RepoWatch.repo_id == key.repo_id,
+                RepoWatch.kind == key.kind,
+                RepoWatch.branch == key.branch,
+            )
+            .values(last_seen_id=last_seen, next_poll_at=datetime.now(UTC) - timedelta(seconds=1))
+        )
+
+
+def is_stopped(watch: RepoWatch) -> bool:
+    return watch.next_poll_at.replace(tzinfo=None) == datetime.max
+
+
+async def test_poller_disables_subscriptions_when_repo_is_gone(sessions):
     gh = FakeGitHub()
     gh.error = NotFoundError("gone")
+    gh.repo = None  # the lookup by ID confirms it
+    wake = asyncio.Event()
+    poller = Poller(settings(), sessions, gh, wake)
+    async with sessions.begin() as s:
+        repo, sub = await make_sub(s, kinds=("release", "commit"))
+        _, other = await make_sub(s, channel=2)
+    await due_watch(sessions, WatchKey(repo.id, "release", ""))
+    await due_watch(sessions, WatchKey(repo.id, "commit", "main"))
+
+    await poller.run_cycle()
+    assert wake.is_set()
+    async with sessions() as s:
+        for sub_id in (sub.id, other.id):
+            disabled = await s.get(Subscription, sub_id)
+            assert not disabled.active
+            assert disabled.disabled_reason == "the repo was deleted or made private"
+            assert disabled.disabled_at is not None and disabled.notified_at is None
+        for watch in (await s.scalars(select(RepoWatch))).all():
+            assert is_stopped(watch)
+            # Covered by the subscriptions' notices, so no separate branch notice.
+            assert watch.notified_at is not None
+        assert await queries.pending_branch_notices(s) == []
+        assert len(await queries.pending_disable_notices(s)) == 2
+
+
+async def test_poller_transient_404_on_existing_repo(sessions):
+    gh = FakeGitHub()
+    gh.error = NotFoundError("glitch")  # but the repo still exists by ID
     poller = Poller(settings(), sessions, gh, asyncio.Event())
     async with sessions.begin() as s:
-        repo, _ = await make_sub(s)
-        key = WatchKey(repo.id, "release", "")
-        await queries.ensure_watch(s, key, initial_interval=TEN_MIN)
-        await make_due(s, key)
+        repo, sub = await make_sub(s)
+    key = WatchKey(repo.id, "release", "")
+    await due_watch(sessions, key, last_seen="")  # baselined, no releases yet
+
     await poller.run_cycle()
     async with sessions() as s:
+        assert (await s.get(Subscription, sub.id)).active
         watch = await queries.get_watch(s, key)
-        assert watch.next_poll_at > datetime.now(UTC) + timedelta(minutes=50)
+        assert not is_stopped(watch)
+        assert "exists" in watch.last_error and watch.last_polled_at is not None
+
+    # The next successful poll clears the error.
+    gh.error = None
+    await due_watch(sessions, key, last_seen="")
+    await poller.run_cycle()
+    async with sessions() as s:
+        assert (await queries.get_watch(s, key)).last_error is None
+
+
+async def test_poller_stops_only_the_deleted_branch(sessions):
+    gh = FakeGitHub()
+    gh.branches = {"main"}  # "dev" was deleted
+    poller = Poller(settings(), sessions, gh, asyncio.Event())
+    async with sessions.begin() as s:
+        repo, sub = await make_sub(s, kinds=("commit",), branches=("main", "dev"))
+    dev, main = WatchKey(repo.id, "commit", "dev"), WatchKey(repo.id, "commit", "main")
+    await due_watch(sessions, dev)
+    await due_watch(sessions, main)
+
+    await poller.run_cycle()
+    async with sessions() as s:
+        assert (await s.get(Subscription, sub.id)).active
+        dev_watch = await queries.get_watch(s, dev)
+        assert is_stopped(dev_watch) and dev_watch.last_error == "branch `dev` no longer exists"
+        assert not is_stopped(await queries.get_watch(s, main))
+        [notice] = await queries.pending_branch_notices(s)
+        assert (notice.key, notice.guild_id, notice.channel_id) == (dev, GUILD, CHANNEL)
+
+    # Re-subscribing to the branch restarts the watch with a fresh baseline.
+    async with sessions.begin() as s:
+        await queries.ensure_watch(s, dev, initial_interval=TEN_MIN)
+    async with sessions() as s:
+        restarted = await queries.get_watch(s, dev)
+        assert not is_stopped(restarted)
+        assert restarted.last_seen_id is None and restarted.last_error is None
+
+
+async def test_metadata_refresh_follows_default_branch_change(sessions):
+    gh = FakeGitHub()
+    poller = Poller(settings(), sessions, gh, asyncio.Event())
+    async with sessions.begin() as s:
+        repo, _ = await make_sub(s, kinds=("commit",))  # follows the default branch
+        await make_sub(s, channel=2, kinds=("commit",), branches=("main",))  # lists main
+        await queries.ensure_watch(s, WatchKey(repo.id, "commit", "main"), initial_interval=TEN_MIN)
+
+    # Unchanged metadata: just recorded as checked.
+    assert await poller.refresh_metadata() == 1
+    assert await poller.refresh_metadata() == 0  # not due again for a day
+    async with sessions() as s:
+        assert (await s.get(Repo, repo.id)).metadata_etag == '"m1"'
+
+    # The default branch moves to trunk, and the repo is renamed.
+    gh.repo = gh_repo(full_name="octo/gadget", default_branch="trunk")
+    gh.metadata_etag = '"m2"'
+    async with sessions.begin() as s:
+        await s.execute(update(Repo).values(metadata_checked_at=None))
+    await poller.refresh_metadata()
+    async with sessions() as s:
+        fresh = await s.get(Repo, repo.id)
+        assert (fresh.full_name, fresh.default_branch) == ("octo/gadget", "trunk")
+        branches = set(await s.scalars(select(RepoWatch.branch)))
+        # trunk for the default follower; main kept because a subscription lists it.
+        assert branches == {"main", "trunk"}
+        trunk = await queries.get_watch(s, WatchKey(repo.id, "commit", "trunk"))
+        assert trunk.last_seen_id is None  # baselined on its first poll, so no history flood
+
+
+async def test_metadata_refresh_disables_missing_repo(sessions):
+    gh = FakeGitHub()
+    gh.repo = None
+    poller = Poller(settings(), sessions, gh, asyncio.Event())
+    async with sessions.begin() as s:
+        _, sub = await make_sub(s)
+    await poller.refresh_metadata()
+    async with sessions() as s:
+        assert not (await s.get(Subscription, sub.id)).active
 
 
 # --------------------------------------------------------------------------- announcer
@@ -344,8 +510,12 @@ class FakeChannel(discord.abc.Messageable):
 
 
 class FakeClient:
-    def __init__(self, channel) -> None:
+    def __init__(self, channel, guild=None) -> None:
         self.channel = channel
+        self.guild = guild
+
+    def get_guild(self, guild_id):
+        return self.guild
 
     def get_channel(self, channel_id):
         return self.channel
@@ -444,7 +614,7 @@ async def test_guild_usage_counts_distinct_repos_and_disabled(sessions):
             include_prereleases=False,
             created_by=USER,
         )
-        await queries.deactivate_subscription(s, first.id)  # disabled still counts
+        await queries.deactivate_subscription(s, first.id, "test")  # disabled still counts
 
         assert await queries.guild_usage(s, GUILD) == queries.GuildUsage(repos=2, subscriptions=3)
         assert await queries.guild_usage(s, 999) == queries.GuildUsage(repos=0, subscriptions=0)
@@ -635,3 +805,109 @@ async def test_upsert_reactivates_and_clears_disable(sessions):
         )
         assert not created and again.active
         assert again.disabled_reason is None and again.disabled_at is None
+
+
+# --------------------------------------------------------------------------- phase 3: health
+
+
+async def test_dispatcher_records_disable_reason(sessions):
+    sub = await seed_release_delivery(sessions)
+    channel = FakeChannel(error=http_error(discord.NotFound, 404))
+    await Dispatcher(settings(), sessions, FakeClient(channel), asyncio.Event()).drain()
+    async with sessions() as s:
+        disabled = await s.get(Subscription, sub.id)
+        assert not disabled.active
+        assert disabled.disabled_reason == "the channel was deleted"
+        assert disabled.disabled_at is not None and disabled.notified_at is None
+
+
+class FakeSystemChannel:
+    def __init__(self, *, can_post=True):
+        self.sent: list[str] = []
+        self.can_post = can_post
+
+    def permissions_for(self, member):
+        return discord.Permissions(view_channel=self.can_post, send_messages=self.can_post)
+
+    async def send(self, content, **kwargs):
+        assert kwargs["allowed_mentions"].everyone is False
+        self.sent.append(content)
+
+
+async def test_admin_notices_grouped_per_server_and_sent_once(sessions):
+    async with sessions.begin() as s:
+        repo, gone = await make_sub(s, channel=1)
+        _, lost = await make_sub(s, channel=2)
+        _, branchy = await make_sub(s, channel=3, kinds=("commit",), branches=("dev",))
+        await queries.deactivate_subscription(s, gone.id, "the repo was deleted or made private")
+        await queries.deactivate_subscription(
+            s, lost.id, "I lost permission to post in the channel"
+        )
+        dev = WatchKey(repo.id, "commit", "dev")
+        await queries.ensure_watch(s, dev, initial_interval=TEN_MIN)
+        await queries.stop_watch(s, dev, "branch `dev` no longer exists")
+
+    system = FakeSystemChannel()
+    guild = SimpleNamespace(system_channel=system, me=object())
+    dispatcher = Dispatcher(settings(), sessions, FakeClient(None, guild), asyncio.Event())
+
+    assert await dispatcher.send_notices() == 1  # one server
+    [message] = system.sent
+    assert "**octo/widget** in <#1>: the repo was deleted or made private." in message
+    assert "**octo/widget** in <#2>: I lost permission to post in the channel." in message
+    assert "**octo/widget**: branch `dev` no longer exists, so its commits in <#3>" in message
+
+    # Already notified: nothing more is sent.
+    assert await dispatcher.send_notices() == 0
+    assert len(system.sent) == 1
+    assert branchy.id  # still active, only the branch stopped
+
+
+async def test_admin_notice_without_usable_system_channel_is_marked_anyway(sessions):
+    async with sessions.begin() as s:
+        _, sub = await make_sub(s)
+        await queries.deactivate_subscription(s, sub.id, "the channel was deleted")
+    system = FakeSystemChannel(can_post=False)
+    guild = SimpleNamespace(system_channel=system, me=object())
+    dispatcher = Dispatcher(settings(), sessions, FakeClient(None, guild), asyncio.Event())
+    await dispatcher.send_notices()
+    assert system.sent == []
+    async with sessions() as s:
+        assert (await s.get(Subscription, sub.id)).notified_at is not None
+
+
+async def test_status_entries_from_health_query(sessions):
+    from repodrop.bot.status import build_entries, paginate, summary
+
+    async with sessions.begin() as s:
+        repo, _ = await make_sub(s, channel=1, kinds=("release", "commit"), branches=("dev",))
+        await make_sub(s, channel=2)
+        _, disabled = await make_sub(s, channel=3)
+        await queries.deactivate_subscription(s, disabled.id, "the channel was deleted")
+        rel, dev = WatchKey(repo.id, "release", ""), WatchKey(repo.id, "commit", "dev")
+        for key in (rel, dev):
+            await queries.ensure_watch(s, key, initial_interval=TEN_MIN)
+        await queries.update_watch(
+            s,
+            rel,
+            etag=None,
+            last_seen_id="",
+            poll_interval=TEN_MIN,
+            next_poll_at=datetime.now(UTC) + TEN_MIN,
+        )
+        await queries.stop_watch(s, dev, "branch `dev` no longer exists")
+
+    async with sessions() as s:
+        rows, watches = await queries.subscription_health(s, GUILD)
+    entries = build_entries(
+        rows, watches, lambda channel_id: ["I'm missing Embed Links"] if channel_id == 2 else []
+    )
+    by_channel = {e.channel_id: e for e in entries}
+    assert by_channel[1].problems == ["Stopped: branch `dev` no longer exists"]
+    assert by_channel[1].what == "releases, commits on `dev`"
+    assert by_channel[1].last_polled_at is not None
+    assert by_channel[2].problems == ["I'm missing Embed Links"]
+    assert not by_channel[3].active and by_channel[3].problems == []  # disabled: no live checks
+    assert summary(entries) == "0 healthy · 3 need attention"
+    [page] = paginate(entries)
+    assert "Disabled: the channel was deleted" in page

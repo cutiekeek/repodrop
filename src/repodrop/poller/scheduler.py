@@ -21,11 +21,14 @@ from repodrop.github.client import (
     RateLimit,
     RateLimitedError,
 )
+from repodrop.github.schemas import Repository
 from repodrop.poller import detectors
 from repodrop.poller.detectors import Detection, RepoRef
 
 # A claimed watch is hidden from other claims for this long; a crashed poll retries after it.
 CLAIM_LEASE = timedelta(minutes=5)
+METADATA_BATCH = 100
+REPO_GONE = "the repo was deleted or made private"
 
 
 def next_interval(
@@ -74,9 +77,9 @@ class Poller:
 
     async def run_maintenance(self) -> None:
         while True:
-            await asyncio.sleep(self._settings.maintenance_interval.total_seconds())
             try:
                 with logfire.span("maintenance"):
+                    await self.refresh_metadata()
                     async with self._sessions.begin() as session:
                         watches, repos = await queries.prune_orphans(session)
                     logfire.info(
@@ -86,6 +89,7 @@ class Poller:
                     )
             except Exception:
                 logfire.exception("maintenance failed")
+            await asyncio.sleep(self._settings.maintenance_interval.total_seconds())
 
     async def run_cycle(self) -> int:
         with logfire.span("poll_cycle") as span:
@@ -130,20 +134,19 @@ class Poller:
                 result = await self._fetch(key, repo.full_name, watch.etag)
             except RateLimitedError as exc:
                 span.set_attribute("result", "rate_limited")
-                await self._reschedule(key, exc.retry_at)
+                await self._reschedule(key, exc.retry_at, error="rate limited by GitHub")
                 return 0
             except NotFoundError:
-                # Deleted, made private, or branch removed. Keep checking, but rarely.
                 span.set_attribute("result", "not_found")
                 logfire.warn("{repo} {kind} returned 404", repo=repo.full_name, kind=key.kind)
-                await self._reschedule(key, self._at(self._settings.poll_max_interval))
+                await self._handle_not_found(watch, repo)
                 return 0
             except GitHubError as exc:
                 span.set_attribute("result", "error")
                 logfire.warn(
                     "GitHub error polling {repo}: {error}", repo=repo.full_name, error=str(exc)
                 )
-                await self._reschedule(key, self._at(watch.poll_interval))
+                await self._reschedule(key, self._at(watch.poll_interval), error=str(exc))
                 return 0
 
             span.set_attribute("result", 304 if result.not_modified else 200)
@@ -235,21 +238,146 @@ class Poller:
             self._settings.github_rate_limit_floor,
         )
 
-    async def _reschedule(self, key: WatchKey, at: datetime) -> None:
+    async def _reschedule(self, key: WatchKey, at: datetime, *, error: str) -> None:
         async with self._sessions.begin() as session:
-            await queries.reschedule_watch(session, key, at)
+            await queries.reschedule_watch(session, key, at, error=error)
 
-    async def _refresh_repo(self, repo: Repo) -> None:
-        """The repo was renamed or transferred; update its display name."""
+    # ------------------------------------------------------------------ missing repos/branches
+
+    async def _handle_not_found(self, watch: ClaimedWatch, repo: Repo) -> None:
+        """Work out whether the repo, or just a commit branch, is gone.
+
+        The commits endpoint answers 404 for a missing branch too, and disabling every
+        subscription to a repo is drastic, so confirm with a lookup by numeric ID first (it
+        survives renames and transfers).
+        """
+        key = watch.key
+        retry_at = self._at(watch.poll_interval)
         try:
             fresh = await self._github.get_repo_by_id(repo.github_id)
+        except NotFoundError:
+            await self._repo_gone(repo)
+            return
+        except GitHubError as exc:
+            await self._reschedule(key, retry_at, error=f"404, then couldn't confirm: {exc}")
+            return
+        if fresh.private:
+            await self._repo_gone(repo)
+            return
+        await self._apply_metadata(repo, fresh, etag=repo.metadata_etag)
+
+        if key.kind == Kind.COMMIT:
+            try:
+                exists = await self._github.branch_exists(fresh.full_name, key.branch)
+            except GitHubError as exc:
+                await self._reschedule(key, retry_at, error=f"404, then couldn't confirm: {exc}")
+                return
+            if not exists:
+                async with self._sessions.begin() as session:
+                    await queries.stop_watch(
+                        session, key, f"branch `{key.branch}` no longer exists"
+                    )
+                logfire.warn(
+                    "stopped watching {repo}@{branch}: branch deleted",
+                    repo=fresh.full_name,
+                    branch=key.branch,
+                )
+                self._wake_announcer.set()  # for the admin notice
+                return
+        # The repo (and branch) still exist, so treat the 404 as a transient glitch.
+        await self._reschedule(key, retry_at, error="GitHub returned 404 for a repo that exists")
+
+    async def _repo_gone(self, repo: Repo) -> None:
+        async with self._sessions.begin() as session:
+            disabled = await queries.disable_repo_subscriptions(session, repo.id, REPO_GONE)
+            await queries.stop_repo_watches(session, repo.id, REPO_GONE)
+        logfire.warn(
+            "{repo} is gone; disabled {count} subscriptions", repo=repo.full_name, count=disabled
+        )
+        self._wake_announcer.set()  # for the admin notices
+
+    # ------------------------------------------------------------------ repo metadata
+
+    async def refresh_metadata(self) -> int:
+        """Re-check repos not checked in the last day (renames, default-branch changes)."""
+        async with self._sessions() as session:
+            repos = await queries.repos_due_for_metadata(
+                session,
+                older_than=self._settings.metadata_refresh_interval,
+                limit=METADATA_BATCH,
+            )
+
+        async def one(repo: Repo) -> None:
+            async with self._semaphore:
+                try:
+                    await self._refresh_metadata_one(repo)
+                except Exception:
+                    logfire.exception("metadata refresh failed for {repo}", repo=repo.full_name)
+
+        await asyncio.gather(*(one(r) for r in repos))
+        return len(repos)
+
+    async def _refresh_metadata_one(self, repo: Repo) -> None:
+        try:
+            result = await self._github.repo_metadata(repo.github_id, etag=repo.metadata_etag)
+        except NotFoundError:
+            await self._repo_gone(repo)
+            async with self._sessions.begin() as session:
+                await queries.record_repo_metadata(session, repo.id, etag=None)
+            return
+        except GitHubError:
+            return  # try again at the next maintenance run
+        if result.items is None:
+            async with self._sessions.begin() as session:
+                await queries.record_repo_metadata(session, repo.id, etag=result.etag)
+            return
+        if result.items.private:
+            await self._repo_gone(repo)
+        await self._apply_metadata(repo, result.items, etag=result.etag)
+
+    async def _refresh_repo(self, repo: Repo) -> None:
+        """A poll was redirected: the repo was renamed or transferred."""
+        try:
+            result = await self._github.repo_metadata(repo.github_id)
         except GitHubError:
             return
+        if result.items is not None:
+            await self._apply_metadata(repo, result.items, etag=result.etag)
+
+    async def _apply_metadata(self, repo: Repo, fresh: Repository, *, etag: str | None) -> None:
+        """Store the repo's current name and default branch.
+
+        When the default branch changed, subscriptions following the default move to the new
+        branch: it gets a watch (baselined on its first poll, so its history isn't announced),
+        and cleanup removes the old branch's watch if nothing lists it explicitly.
+        """
+        branch_changed = fresh.default_branch != repo.default_branch
         async with self._sessions.begin() as session:
-            await queries.update_repo_metadata(
-                session, repo.id, full_name=fresh.full_name, default_branch=fresh.default_branch
+            await queries.record_repo_metadata(
+                session,
+                repo.id,
+                etag=etag,
+                full_name=fresh.full_name,
+                default_branch=fresh.default_branch,
             )
-        logfire.info("repo {old} is now {new}", old=repo.full_name, new=fresh.full_name)
+            if branch_changed:
+                await queries.ensure_default_branch_watch(
+                    session,
+                    repo.id,
+                    fresh.default_branch,
+                    initial_interval=self._settings.poll_default_interval,
+                )
+                await queries.prune_orphans(session)
+        if fresh.full_name != repo.full_name:
+            logfire.info("repo {old} is now {new}", old=repo.full_name, new=fresh.full_name)
+        if branch_changed:
+            logfire.info(
+                "{repo} default branch changed from {old} to {new}",
+                repo=fresh.full_name,
+                old=repo.default_branch,
+                new=fresh.default_branch,
+            )
+        repo.full_name, repo.default_branch = fresh.full_name, fresh.default_branch
 
 
 def _baseline(kind: str, items: list[Any]) -> str:
