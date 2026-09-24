@@ -139,7 +139,7 @@ CREATE TABLE events (
     repo_id     BIGINT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
     kind        TEXT   NOT NULL,
     external_id TEXT   NOT NULL,               -- release ID / tag name / push range
-    payload     JSONB  NOT NULL,               -- includes html_url, previous_tag, assets (§8.4)
+    payload     JSONB  NOT NULL,               -- includes html_url, previous_tag (§8.4)
     detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (repo_id, kind, external_id)
 );
@@ -180,7 +180,6 @@ CREATE TABLE guild_settings (
     subscriber_role_id  BIGINT,                -- NULL = everyone can subscribe
     default_channel_id  BIGINT,                -- NULL = channel the command was run in
     embed_style         TEXT NOT NULL DEFAULT 'full',     -- 'full' | 'compact'
-    show_asset_buttons  BOOLEAN NOT NULL DEFAULT true,
     latest_access       TEXT NOT NULL DEFAULT 'everyone', -- 'everyone' | 'managers'
     latest_allow_public BOOLEAN NOT NULL DEFAULT true,
 
@@ -272,7 +271,7 @@ When a guild removes the bot, its subscriptions are deleted, and the cascades cl
    LIMIT 50
    FOR UPDATE SKIP LOCKED;
    ```
-2. Build the embed and its link buttons (§8.4) from the event payload, using the server's `embed_style` and `show_asset_buttons` settings, and send it with `allowed_mentions=AllowedMentions.none()`.
+2. Build the embed and its link buttons (§8.4) from the event payload, using the server's `embed_style` setting, and send it with `allowed_mentions=AllowedMentions.none()`.
 3. On success, set `status='sent'` and record `message_id` and `sent_at`.
 4. On failure:
    - A Discord `Forbidden` or `NotFound` error (channel deleted or permissions lost) deactivates the subscription with a `disabled_reason`, marks the delivery `skipped`, and sends the admin notice described in §8.6.
@@ -285,14 +284,12 @@ Announcements carry **link buttons** (`discord.ui.Button(style=ButtonStyle.link,
 
 | Event kind | Buttons |
 |---|---|
-| Release | **View release** (`html_url`), **Compare** (`/compare/{previous_tag}...{tag}`, omitted when there's no previous tag), and up to 3 **Download** buttons for release assets |
+| Release | **View release** (`html_url`), and **Compare** (`/compare/{previous_tag}...{tag}`, omitted when there's no previous tag) |
 | Tag | **View tag**, **Compare** |
 | Commits (batched, per branch) | **View commits** (`/compare/{before_sha}...{after_sha}`). The embed title names the branch. |
 
-- Discord allows 5 buttons per row, so a release uses at most one row. When a release has more than 3 assets, the embed footer says how many more are on the release page.
-- Button labels are capped at 80 characters, so long asset names are truncated.
-- The event payload stores only what the buttons need: `html_url`, `tag_name`, `previous_tag`, and the first 3 assets' `name`, `browser_download_url` and `size`, plus the total asset count.
-- Download buttons are left out when the server has `show_asset_buttons` turned off.
+- There are no download buttons, to keep announcements clean: downloads are one click away on the release page.
+- The event payload stores only what the buttons need: `html_url`, `tag_name`, and `previous_tag`.
 - The same builder renders `/github latest` replies, so both look identical and respect the same settings.
 
 **Embed styles:**
@@ -342,7 +339,6 @@ The poller can't post to Discord (§6 layering rule), so notices go through the 
 | Subscriber role | Role select (with a "clear" option) | `subscriber_role_id`. When set, only members with this role (plus managers) can subscribe. Clearing it opens subscribing to everyone again. |
 | Default channel | Channel select (text and announcement channels) | `default_channel_id` |
 | Embed style | Select: Full / Compact | `embed_style` |
-| Download buttons | Toggle button | `show_asset_buttons` |
 | Who can use `/github latest` | Select: Everyone / Managers only | `latest_access` |
 | Allow public `/github latest` | Toggle button | `latest_allow_public` |
 

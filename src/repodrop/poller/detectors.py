@@ -87,14 +87,37 @@ def detect_releases(repo: RepoRef, releases: list[Release], last_seen: str) -> D
         watermark=watermark,
         events=[
             DetectedEvent(
-                external_id=str(r.id), payload=release_payload(repo, r), prerelease=r.prerelease
+                external_id=str(r.id),
+                payload=release_payload(repo, r, previous_tag=previous_release_tag(r, releases)),
+                prerelease=r.prerelease,
             )
             for r in new
         ],
     )
 
 
-def release_payload(repo: RepoRef, release: Release) -> dict[str, Any]:
+def previous_release_tag(release: Release, releases: list[Release]) -> str | None:
+    """The tag of the next-older published release in the same response, for Compare.
+
+    A stable release compares against the previous stable one (v1.9 -> v2.0, not
+    v2.0-rc1 -> v2.0); a pre-release compares against the previous release of any kind.
+    """
+    if release.published_at is None:
+        return None
+    older = [
+        r
+        for r in _published(releases)
+        if r.published_at < release.published_at  # type: ignore[operator]
+        and (release.prerelease or not r.prerelease)
+    ]
+    if not older:
+        return None
+    return max(older, key=lambda r: r.published_at).tag_name  # type: ignore[arg-type, return-value]
+
+
+def release_payload(
+    repo: RepoRef, release: Release, *, previous_tag: str | None = None
+) -> dict[str, Any]:
     body = release.body or ""
     return {
         "repo": repo.payload(),
@@ -107,6 +130,7 @@ def release_payload(repo: RepoRef, release: Release) -> dict[str, Any]:
         "prerelease": release.prerelease,
         "published_at": _iso(release.published_at) if release.published_at else None,
         "author": _user(release.author),
+        "previous_tag": previous_tag,
     }
 
 
@@ -134,17 +158,27 @@ def detect_tags(repo: RepoRef, tags: list[Tag], last_seen: str) -> Detection:
     return Detection(
         watermark=tags[0].name,
         events=[
-            DetectedEvent(external_id=t.name, payload=tag_payload(repo, t)) for t in reversed(new)
+            DetectedEvent(
+                external_id=t.name,
+                payload=tag_payload(repo, t, previous_tag=_next_name(tags, i)),
+            )
+            for i, t in reversed(list(enumerate(new)))
         ],
     )
 
 
-def tag_payload(repo: RepoRef, tag: Tag) -> dict[str, Any]:
+def _next_name(tags: list[Tag], index: int) -> str | None:
+    """The tag listed after `tags[index]` (GitHub lists newest first), for Compare."""
+    return tags[index + 1].name if index + 1 < len(tags) else None
+
+
+def tag_payload(repo: RepoRef, tag: Tag, *, previous_tag: str | None = None) -> dict[str, Any]:
     return {
         "repo": repo.payload(),
         "name": tag.name,
         "sha": tag.commit.sha,
         "html_url": f"{repo.html_url}/tree/{tag.name}",
+        "previous_tag": previous_tag,
     }
 
 

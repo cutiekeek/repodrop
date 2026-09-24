@@ -176,7 +176,6 @@ class GuildSettings(Base):
     subscriber_role_id: Mapped[int | None] = mapped_column(BigInteger)  # NULL = everyone
     default_channel_id: Mapped[int | None] = mapped_column(BigInteger)
     embed_style: Mapped[str] = mapped_column(Text, server_default=EmbedStyle.FULL.value)
-    show_asset_buttons: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
     latest_access: Mapped[str] = mapped_column(Text, server_default=LatestAccess.EVERYONE.value)
     latest_allow_public: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
 

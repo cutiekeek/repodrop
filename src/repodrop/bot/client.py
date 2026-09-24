@@ -31,7 +31,9 @@ class RepoDropBot(commands.Bot):
         self.guild_settings = GuildSettingsCache(settings, self.sessions)
         self.announcer_wake = asyncio.Event()
         self.poller = Poller(settings, self.sessions, self.github, self.announcer_wake)
-        self.dispatcher = Dispatcher(settings, self.sessions, self, self.announcer_wake)
+        self.dispatcher = Dispatcher(
+            settings, self.sessions, self, self.announcer_wake, self.guild_settings
+        )
         self._background: list[asyncio.Task[None]] = []
 
     async def setup_hook(self) -> None:

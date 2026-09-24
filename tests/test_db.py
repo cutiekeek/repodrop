@@ -911,3 +911,20 @@ async def test_status_entries_from_health_query(sessions):
     assert summary(entries) == "0 healthy · 3 need attention"
     [page] = paginate(entries)
     assert "Disabled: the channel was deleted" in page
+
+
+# --------------------------------------------------------------------------- phase 4: presentation
+
+
+async def test_dispatcher_sends_buttons_and_uses_server_embed_style(sessions):
+    from repodrop.guild_settings import GuildSettingsCache
+
+    await seed_release_delivery(sessions)
+    cache = GuildSettingsCache(settings(), sessions)
+    await cache.update(GUILD, embed_style="compact")
+    channel = FakeChannel()
+    await Dispatcher(settings(), sessions, FakeClient(channel), asyncio.Event(), cache).drain()
+
+    [sent] = channel.sent
+    assert sent["embed"].description is None  # compact: no release notes
+    assert [b.label for b in sent["view"].children] == ["View release"]

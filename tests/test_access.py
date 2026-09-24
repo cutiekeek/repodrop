@@ -100,7 +100,6 @@ def test_effective_settings_fall_back_to_config():
         blocked=False,
         manager_role_id=MANAGER_ROLE,
         embed_style="compact",
-        show_asset_buttons=True,
         latest_access="everyone",
         latest_allow_public=True,
     )

@@ -37,7 +37,10 @@ All under `/github`, with ephemeral replies. The group is visible to everyone; a
 | `/github unsubscribe repo [channel]` | Stop announcing a repo in a channel. Your own subscriptions, or any as a manager. |
 | `/github list [channel]` | Show this server's subscriptions. |
 | `/github status [channel]` | Health report: what each subscription posts, when it last posted and was checked, and any problems (missing permissions, deleted branches, disabled subscriptions). Managers only. |
+| `/github latest repo [public]` | Show a repo's newest release (or newest tag) with its buttons, no subscription needed. Only you see it unless you pass `public:true`. Servers can limit it to managers or turn off public posts. |
 | `/github test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. |
+
+Announcements carry link buttons: **View release** / **View tag** / **View commits**, plus **Compare** against the previous version. Servers can choose a compact style (no release notes).
 
 When a subscription is disabled automatically (the channel was deleted, the bot lost permission, or the repo was deleted or made private), or a followed branch is deleted, the bot posts one notice in the server's system channel if it can.
 

@@ -27,7 +27,6 @@ class EffectiveSettings:
     subscriber_role_id: int | None = None
     default_channel_id: int | None = None
     embed_style: str = EmbedStyle.FULL
-    show_asset_buttons: bool = True
     latest_access: str = LatestAccess.EVERYONE
     latest_allow_public: bool = True
 
@@ -56,7 +55,6 @@ class EffectiveSettings:
             subscriber_role_id=row.subscriber_role_id,
             default_channel_id=row.default_channel_id,
             embed_style=row.embed_style,
-            show_asset_buttons=row.show_asset_buttons,
             latest_access=row.latest_access,
             latest_allow_public=row.latest_allow_public,
         )

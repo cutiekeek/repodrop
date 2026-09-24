@@ -8,11 +8,12 @@ import discord
 import logfire
 
 from repodrop import observability
-from repodrop.announcer.embeds import build_embed
+from repodrop.announcer.embeds import DEFAULT_PRESENTATION, Presentation, build_message
 from repodrop.config import Settings
 from repodrop.db import queries
 from repodrop.db.queries import ClaimedDelivery
 from repodrop.db.session import SessionFactory
+from repodrop.guild_settings import GuildSettingsCache
 
 # Claimed deliveries are hidden from other claims for this long; a crash mid-send retries after it.
 CLAIM_LEASE = timedelta(minutes=5)
@@ -36,11 +37,13 @@ class Dispatcher:
         sessions: SessionFactory,
         client: discord.Client,
         wake: asyncio.Event,
+        guild_settings: GuildSettingsCache | None = None,
     ) -> None:
         self._settings = settings
         self._sessions = sessions
         self._client = client
         self._wake = wake
+        self._guild_settings = guild_settings
 
     async def run(self) -> None:
         await self._client.wait_until_ready()
@@ -98,9 +101,11 @@ class Dispatcher:
             if not isinstance(channel, discord.abc.Messageable):
                 await self._skip(d, NOT_MESSAGEABLE, disable_reason=NOT_MESSAGEABLE)
                 return "skipped"
-            embed = build_embed(d.event_kind, d.payload)
+            embed, view = build_message(
+                d.event_kind, d.payload, await self._presentation(d.guild_id)
+            )
             message = await channel.send(
-                embed=embed, allowed_mentions=discord.AllowedMentions.none()
+                embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none()
             )
         except (discord.Forbidden, discord.NotFound) as exc:
             # Channel deleted, or the bot lost access: stop delivering to this subscription.
@@ -136,6 +141,12 @@ class Dispatcher:
         async with self._sessions.begin() as session:
             await queries.mark_delivery_sent(session, d.id, message.id)
         return "sent"
+
+    async def _presentation(self, guild_id: int) -> Presentation:
+        if self._guild_settings is None:
+            return DEFAULT_PRESENTATION
+        settings = await self._guild_settings.get(guild_id)
+        return Presentation(settings.embed_style)
 
     async def _skip(
         self, d: ClaimedDelivery, error: str, *, disable_reason: str | None = None

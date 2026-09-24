@@ -1,6 +1,8 @@
-"""`/github` slash commands: subscribe, unsubscribe, list, status, test."""
+"""`/github` slash commands: subscribe, unsubscribe, list, status, latest, test."""
 
 import asyncio
+import time
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any
 
 import discord
@@ -8,7 +10,7 @@ import logfire
 from discord import app_commands
 from discord.ext import commands
 
-from repodrop.announcer.embeds import release_embed
+from repodrop.announcer.embeds import Presentation, build_message
 from repodrop.bot import status as status_report
 from repodrop.bot.checks import (
     AccessDenied,
@@ -20,13 +22,18 @@ from repodrop.bot.checks import (
     subscriber_only,
 )
 from repodrop.db import queries
-from repodrop.db.models import Kind, Subscription
+from repodrop.db.models import Kind, LatestAccess, Subscription
 from repodrop.db.queries import WatchKey
 from repodrop.github.client import GitHubError, NotFoundError, RateLimitedError
 from repodrop.github.names import parse_repo
 from repodrop.github.schemas import Release, Repository
 from repodrop.guild_settings import EffectiveSettings, cap_violation, usage_line
-from repodrop.poller.detectors import RepoRef, release_payload
+from repodrop.poller.detectors import (
+    RepoRef,
+    previous_release_tag,
+    release_payload,
+    tag_payload,
+)
 from repodrop.subscription_plan import (
     PlanError,
     SubscribeOptions,
@@ -46,6 +53,8 @@ REQUIRED_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True
 # What a member needs in a channel to point the bot at it (managers are exempt), so nobody can
 # use the bot to post somewhere they can't post themselves.
 MEMBER_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True)
+# /github latest results are cached per repo so repeated lookups don't spend GitHub's rate limit.
+LATEST_CACHE_TTL = 300
 
 
 class UserError(Exception):
@@ -60,6 +69,7 @@ class SubscriptionsCog(
 ):
     def __init__(self, bot: "RepoDropBot") -> None:
         self.bot = bot
+        self._latest_cache: dict[str, tuple[float, str, dict[str, Any]]] = {}
         super().__init__()
 
     async def interaction_check(self, interaction: discord.Interaction, /) -> bool:
@@ -381,6 +391,75 @@ class SubscriptionsCog(
         view = status_report.StatusView(title, summary_line, pages, interaction.user.id)
         await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
 
+    # ------------------------------------------------------------------ /github latest
+
+    @app_commands.command(description="Show a repo's newest release, no subscription needed")
+    @app_commands.describe(
+        repo="owner/name or a github.com URL",
+        public="Post it visibly in this channel (default: only you see it)",
+    )
+    @app_commands.checks.cooldown(3, 30, key=lambda i: (i.guild_id, i.user.id))
+    async def latest(
+        self, interaction: discord.Interaction, repo: str, public: bool = False
+    ) -> None:
+        settings = await settings_for(interaction)
+        if settings.latest_access == LatestAccess.MANAGERS and not is_manager(
+            interaction.user,  # type: ignore[arg-type]
+            settings,
+        ):
+            raise AccessDenied("Only managers can use `/github latest` in this server.")
+        note = None
+        if public and not settings.latest_allow_public:
+            public = False
+            note = "-# Public posts are turned off in this server, so only you can see this."
+
+        await interaction.response.defer(ephemeral=not public, thinking=True)
+        kind, payload = await self._latest_payload(repo)
+        embed, view = build_message(kind, payload, _presentation_of(settings))
+        await interaction.followup.send(
+            content=note,
+            embed=embed,
+            ephemeral=not public,
+            allowed_mentions=discord.AllowedMentions.none(),
+            **_view_kw(view),
+        )
+
+    async def _latest_payload(self, value: str) -> tuple[str, dict[str, Any]]:
+        """The newest stable release, else the newest tag, cached for a few minutes.
+
+        One releases request covers both the release and its previous tag (for Compare).
+        """
+        full_name = parse_repo(value)
+        if full_name is None:
+            raise UserError("Give the repo as `owner/name` or a github.com URL.")
+        cache_key = full_name.lower()
+        if (cached := self._latest_cache.get(cache_key)) and (
+            time.monotonic() - cached[0] < LATEST_CACHE_TTL
+        ):
+            return cached[1], cached[2]
+
+        gh_repo = await self._resolve_repo(full_name)
+        ref = RepoRef(gh_repo.full_name)
+        releases = await self._github_call(self.bot.github.list_releases(gh_repo.full_name))
+        items = releases.items or []
+        stable = [r for r in items if not r.prerelease]
+        if release := _latest_release(stable):
+            kind = "release"
+            payload = release_payload(
+                ref, release, previous_tag=previous_release_tag(release, items)
+            )
+        else:
+            tags = await self._github_call(self.bot.github.list_tags(gh_repo.full_name, per_page=2))
+            tag_items = tags.items or []
+            if not tag_items:
+                raise UserError(f"**{gh_repo.full_name}** has no releases or tags yet.")
+            kind = "tag"
+            payload = tag_payload(
+                ref, tag_items[0], previous_tag=tag_items[1].name if len(tag_items) > 1 else None
+            )
+        self._latest_cache[cache_key] = (time.monotonic(), kind, payload)
+        return kind, payload
+
     # ------------------------------------------------------------------ /github test
 
     @app_commands.command(
@@ -400,14 +479,22 @@ class SubscriptionsCog(
         target = self._target_channel(interaction, channel)
         self._check_bot_permissions(target)
         gh_repo = await self._resolve_repo(repo)
-        result = await self.bot.github.list_releases(gh_repo.full_name)
-        release = _latest_release(result.items or [])
+        releases = await self._github_call(self.bot.github.list_releases(gh_repo.full_name))
+        items = releases.items or []
+        release = _latest_release(items)
         if release is None:
             raise UserError(f"**{gh_repo.full_name}** has no published releases to test with.")
 
-        embed = release_embed(release_payload(RepoRef(gh_repo.full_name), release))
+        payload = release_payload(
+            RepoRef(gh_repo.full_name),
+            release,
+            previous_tag=previous_release_tag(release, items),
+        )
+        embed, view = build_message("release", payload, await self._presentation(interaction))
         try:
-            await target.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            await target.send(
+                embed=embed, allowed_mentions=discord.AllowedMentions.none(), **_view_kw(view)
+            )
         except discord.Forbidden as exc:
             raise UserError(f"I couldn't post in {target.mention}: {exc.text}") from exc
         await interaction.followup.send(
@@ -424,6 +511,7 @@ class SubscriptionsCog(
         return await self._repo_choices(interaction, current, own_only=True)
 
     @test.autocomplete("repo")
+    @latest.autocomplete("repo")
     async def _test_autocomplete(
         self, interaction: discord.Interaction, current: str
     ) -> list[app_commands.Choice[str]]:
@@ -482,6 +570,20 @@ class SubscriptionsCog(
                 "subscribe it to a repo."
             )
 
+    async def _presentation(self, interaction: discord.Interaction) -> Presentation:
+        return _presentation_of(await settings_for(interaction))
+
+    @staticmethod
+    async def _github_call[T](call: Awaitable[T]) -> T:
+        try:
+            return await call
+        except RateLimitedError:
+            raise UserError(
+                "GitHub is rate limiting me right now; try again in a few minutes."
+            ) from None
+        except GitHubError:
+            raise UserError("GitHub didn't respond properly; try again in a moment.") from None
+
     async def _resolve_repo(self, value: str) -> Repository:
         full_name = parse_repo(value)
         if full_name is None:
@@ -519,6 +621,15 @@ class SubscriptionsCog(
             await interaction.followup.send(message, ephemeral=True)
         else:
             await interaction.response.send_message(message, ephemeral=True)
+
+
+def _presentation_of(settings: EffectiveSettings) -> Presentation:
+    return Presentation(settings.embed_style)
+
+
+def _view_kw(view: discord.ui.View | None) -> dict[str, discord.ui.View]:
+    """`view=None` isn't accepted everywhere, so only pass it when there is one."""
+    return {"view": view} if view is not None else {}
 
 
 def _missing(channel: discord.TextChannel) -> list[str]:
