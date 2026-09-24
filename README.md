@@ -1,0 +1,44 @@
+# repodrop
+
+A Discord bot that watches public GitHub repositories and announces new releases, tags, and commits in subscribed channels. See [DESIGN.md](DESIGN.md) for the full design.
+
+## Setup
+
+Requires [uv](https://docs.astral.sh/uv/) and PostgreSQL. Create a role and database for the bot first:
+
+```sql
+CREATE ROLE repodrop LOGIN PASSWORD 'repodrop';
+CREATE DATABASE repodrop OWNER repodrop;
+```
+
+```sh
+uv sync                      # creates .venv and installs dependencies
+cp .env.example .env         # then fill in DISCORD_TOKEN and GITHUB_TOKEN
+uv run alembic upgrade head  # create the schema
+uv run repodrop              # start the bot, poller, and announcer
+```
+
+- **Discord token:** create an application at <https://discord.com/developers/applications>. No privileged intents are needed. Invite it with the `bot` and `applications.commands` scopes and the View Channel, Send Messages, and Embed Links permissions.
+- **GitHub token:** a fine-grained token with no extra permissions works (public repo read access only). It raises the rate limit from 60 to 5,000 requests/hour.
+- Set `DEV_GUILD_ID` while developing so slash command changes show up instantly in that server.
+
+## Commands
+
+All under `/github`, visible to members with **Manage Server**, with ephemeral replies:
+
+| Command | What it does |
+|---|---|
+| `/github subscribe repo [events] [channel] [prereleases] [branch]` | Start announcing a repo. Running it again for the same channel updates the settings. |
+| `/github unsubscribe repo [channel]` | Stop announcing a repo in a channel. |
+| `/github list [channel]` | Show this server's subscriptions. |
+| `/github test repo [channel]` | Post the repo's latest release to check formatting and permissions. |
+
+## Development
+
+```sh
+uv run pytest                 # DB tests use a throwaway schema in DATABASE_URL (or TEST_DATABASE_URL); skipped if Postgres is down
+uv run ruff check . && uv run ruff format .
+uv run alembic revision --autogenerate -m "describe change"   # needs a running database
+```
+
+Layout (`src/repodrop/`): `github/`, `db/`, and `poller/` never import `discord`; only `bot/` and `announcer/` do.
