@@ -38,6 +38,7 @@ class Settings(DatabaseSettings):
     # Default per-server caps; the operator can override them per server (guild_settings).
     max_repos_per_guild: int = 25  # distinct repos
     max_subs_per_guild: int = 100  # (channel, repo) pairs
+    max_branches_per_sub: int = 5  # commit branches per subscription
 
     # Discord user IDs allowed to run owner commands: "123,456" or a JSON list.
     owner_ids: Annotated[list[int], NoDecode] = []

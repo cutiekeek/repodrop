@@ -80,9 +80,12 @@ class Subscription(Base):
     channel_id: Mapped[int] = mapped_column(BigInteger)
     repo_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("repos.id"))
     kinds: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{release}'"))
-    branch: Mapped[str | None] = mapped_column(Text)  # NULL = default branch
+    # Commit branches; empty = follow the repo's default branch.
+    branches: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'"))
     include_prereleases: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
     active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    disabled_reason: Mapped[str | None] = mapped_column(Text)  # set when auto-disabled
+    disabled_at: Mapped[datetime | None] = mapped_column()
     created_by: Mapped[int] = mapped_column(BigInteger)  # Discord user ID
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

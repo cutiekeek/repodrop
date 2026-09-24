@@ -112,22 +112,25 @@ async def upsert_subscription(
     channel_id: int,
     repo_id: int,
     kinds: list[str],
-    branch: str | None,
+    branches: list[str],
     include_prereleases: bool,
     created_by: int,
 ) -> tuple[Subscription, bool]:
     """Create the subscription, or overwrite the settings of an existing one.
 
-    Returns `(subscription, created)`. Callers check who may update an existing one.
+    An existing subscription is reactivated if it was disabled. Returns
+    `(subscription, created)`. Callers check who may update an existing one.
     """
     existing = await get_subscription(
         session, guild_id=guild_id, channel_id=channel_id, repo_id=repo_id
     )
     if existing is not None:
         existing.kinds = kinds
-        existing.branch = branch
+        existing.branches = branches
         existing.include_prereleases = include_prereleases
         existing.active = True
+        existing.disabled_reason = None
+        existing.disabled_at = None
         await session.flush()
         return existing, False
 
@@ -136,7 +139,7 @@ async def upsert_subscription(
         channel_id=channel_id,
         repo_id=repo_id,
         kinds=kinds,
-        branch=branch,
+        branches=branches,
         include_prereleases=include_prereleases,
         created_by=created_by,
     )
@@ -227,7 +230,11 @@ async def prune_orphans(session: AsyncSession) -> tuple[int, int]:
                 WHERE s.repo_id = w.repo_id
                   AND s.active
                   AND w.kind = ANY (s.kinds)
-                  AND (w.kind <> 'commit' OR COALESCE(s.branch, r.default_branch) = w.branch)
+                  AND (
+                    w.kind <> 'commit'
+                    OR w.branch = ANY (s.branches)
+                    OR (cardinality(s.branches) = 0 AND w.branch = r.default_branch)
+                  )
               )
             """
         )
@@ -420,19 +427,29 @@ async def fan_out_event(
     default_branch: str,
     prerelease: bool = False,
 ) -> int:
-    """Create a pending delivery for every active subscription that wants this event."""
+    """Create a pending delivery for every active subscription that wants this event.
+
+    Subscriptions in blocked servers, and commit events in servers with commits disallowed, are
+    skipped but kept, so lifting the restriction resumes delivery. A server with no settings row
+    uses the defaults (not blocked, commits allowed).
+    """
     # Typed cast: an untyped bind in a SELECT list would resolve to text in Postgres.
-    matching = select(cast(literal(event_id), BigInteger), Subscription.id).where(
-        Subscription.repo_id == key.repo_id,
-        Subscription.active,
-        Subscription.kinds.any_() == key.kind,
+    matching = (
+        select(cast(literal(event_id), BigInteger), Subscription.id)
+        .outerjoin(GuildSettings, GuildSettings.guild_id == Subscription.guild_id)
+        .where(
+            Subscription.repo_id == key.repo_id,
+            Subscription.active,
+            Subscription.kinds.any_() == key.kind,
+            ~func.coalesce(GuildSettings.blocked, False),
+        )
     )
     if key.kind == Kind.COMMIT:
-        # A NULL subscription branch means "the default branch".
-        branch_match = Subscription.branch == key.branch
+        branch_match = Subscription.branches.any_() == key.branch
         if key.branch == default_branch:
-            branch_match = or_(branch_match, Subscription.branch.is_(None))
-        matching = matching.where(branch_match)
+            # An empty branch list means "follow the default branch".
+            branch_match = or_(branch_match, func.cardinality(Subscription.branches) == 0)
+        matching = matching.where(branch_match, func.coalesce(GuildSettings.commits_allowed, True))
     if prerelease:
         matching = matching.where(Subscription.include_prereleases)
 
@@ -442,6 +459,41 @@ async def fan_out_event(
         .on_conflict_do_nothing()
     )
     result = await session.execute(stmt)
+    return result.rowcount  # type: ignore[attr-defined]
+
+
+async def skip_removed_deliveries(
+    session: AsyncSession,
+    subscription_id: int,
+    *,
+    kinds: Sequence[str] = (),
+    commit_branches: Sequence[str] = (),
+    prereleases: bool = False,
+) -> int:
+    """Mark pending deliveries `skipped` for what an update just stopped announcing."""
+    conditions = []
+    if kinds:
+        conditions.append(Event.kind.in_(kinds))
+    if commit_branches:
+        conditions.append(
+            (Event.kind == Kind.COMMIT) & Event.payload["branch"].astext.in_(commit_branches)
+        )
+    if prereleases:
+        conditions.append(
+            (Event.kind == Kind.RELEASE) & (Event.payload["prerelease"].astext == "true")
+        )
+    if not conditions:
+        return 0
+    result = await session.execute(
+        update(Delivery)
+        .where(
+            Delivery.event_id == Event.id,
+            Delivery.subscription_id == subscription_id,
+            Delivery.status == DeliveryStatus.PENDING,
+            or_(*conditions),
+        )
+        .values(status=DeliveryStatus.SKIPPED, last_error="removed from subscription")
+    )
     return result.rowcount  # type: ignore[attr-defined]
 
 

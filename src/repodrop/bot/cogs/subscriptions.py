@@ -1,5 +1,6 @@
 """`/github` slash commands: subscribe, unsubscribe, list, test."""
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import discord
@@ -18,25 +19,28 @@ from repodrop.bot.checks import (
     subscriber_only,
 )
 from repodrop.db import queries
-from repodrop.db.models import Kind
+from repodrop.db.models import Kind, Subscription
 from repodrop.db.queries import WatchKey
 from repodrop.github.client import GitHubError, NotFoundError, RateLimitedError
 from repodrop.github.names import parse_repo
 from repodrop.github.schemas import Release, Repository
-from repodrop.guild_settings import cap_violation, usage_line
+from repodrop.guild_settings import EffectiveSettings, cap_violation, usage_line
 from repodrop.poller.detectors import RepoRef, release_payload
+from repodrop.subscription_plan import (
+    PlanError,
+    SubscribeOptions,
+    SubscriptionState,
+    describe_changes,
+    describe_state,
+    needed_watches,
+    parse_branches,
+    plan_subscription,
+    removed_by_update,
+)
 
 if TYPE_CHECKING:
     from repodrop.bot.client import RepoDropBot
 
-EVENT_PRESETS: dict[str, list[str]] = {
-    "releases": [Kind.RELEASE],
-    "tags": [Kind.TAG],
-    "commits": [Kind.COMMIT],
-    "releases+tags": [Kind.RELEASE, Kind.TAG],
-    "all": [Kind.RELEASE, Kind.TAG, Kind.COMMIT],
-}
-KIND_LABELS = {Kind.RELEASE: "releases", Kind.TAG: "tags", Kind.COMMIT: "commits"}
 REQUIRED_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True, embed_links=True)
 # What a member needs in a channel to point the bot at it (managers are exempt), so nobody can
 # use the bot to post somewhere they can't post themselves.
@@ -66,22 +70,17 @@ class SubscriptionsCog(
 
     # ------------------------------------------------------------------ /github subscribe
 
-    @app_commands.command(description="Announce a public GitHub repo's updates in a channel")
+    @app_commands.command(
+        description="Announce a public GitHub repo's updates, or change what's announced"
+    )
     @app_commands.describe(
         repo="owner/name or a github.com URL",
-        events="Which updates to announce (default: releases)",
-        channel="Where to post (default: this channel)",
-        prereleases="Also announce pre-releases (default: no)",
-        branch="Branch to watch for commits (default: the repo's default branch)",
-    )
-    @app_commands.choices(
-        events=[
-            app_commands.Choice(name="Releases", value="releases"),
-            app_commands.Choice(name="Tags", value="tags"),
-            app_commands.Choice(name="Commits", value="commits"),
-            app_commands.Choice(name="Releases + tags", value="releases+tags"),
-            app_commands.Choice(name="Everything", value="all"),
-        ]
+        channel="Where to post (default: the server's default channel, else this one)",
+        releases="Announce releases (on by default for a new subscription)",
+        tags="Announce new tags",
+        commits="Announce new commits",
+        branches="Commit branches, comma-separated, or 'default' for the repo's default branch",
+        prereleases="Also announce pre-releases",
     )
     @subscriber_only()
     @app_commands.checks.cooldown(5, 60, key=lambda i: (i.guild_id, i.user.id))
@@ -89,31 +88,46 @@ class SubscriptionsCog(
         self,
         interaction: discord.Interaction,
         repo: str,
-        events: str = "releases",
         channel: discord.TextChannel | None = None,
-        prereleases: bool = False,
-        branch: str | None = None,
+        releases: bool | None = None,
+        tags: bool | None = None,
+        commits: bool | None = None,
+        branches: str | None = None,
+        prereleases: bool | None = None,
     ) -> None:
+        """Creates a subscription, or updates the existing one for this repo and channel.
+
+        On an update, only the options passed change.
+        """
         await interaction.response.defer(ephemeral=True, thinking=True)
         assert interaction.guild is not None
-        target = self._target_channel(interaction, channel)
-        self._check_bot_permissions(target)
         settings = await settings_for(interaction)
+        target = self._target_channel(interaction, channel, settings)
+        self._check_bot_permissions(target)
         member = interaction.user
         assert isinstance(member, discord.Member)
         if not is_manager(member, settings):
             self._check_member_permissions(target, member)
 
+        opts = SubscribeOptions(
+            releases=releases,
+            tags=tags,
+            commits=commits,
+            branches=branches,
+            prereleases=prereleases,
+        )
+        max_branches = self.bot.settings.max_branches_per_sub
         gh_repo = await self._resolve_repo(repo)
-        kinds = EVENT_PRESETS[events]
-        if Kind.COMMIT not in kinds:
-            branch = None
-        elif branch is not None:
-            branch = branch.strip()
-            if branch == gh_repo.default_branch:
-                branch = None  # track the default branch even if it's renamed later
-            elif not await self.bot.github.branch_exists(gh_repo.full_name, branch):
-                raise UserError(f"Branch `{branch}` doesn't exist in **{gh_repo.full_name}**.")
+        # Branch names only come from this option (stored ones were checked when added), so
+        # check them against GitHub now, before taking the server lock.
+        if branches is not None:
+            try:
+                names = parse_branches(branches)
+            except PlanError as exc:
+                raise UserError(str(exc)) from None
+            if len(names) > max_branches:
+                raise UserError(f"A subscription can follow at most {max_branches} branches.")
+            await self._check_branches_exist(gh_repo, names)
 
         async with self.bot.sessions.begin() as session:
             # Serialize subscribes per server so concurrent ones can't race past the caps.
@@ -127,13 +141,24 @@ class SubscriptionsCog(
             existing = await queries.get_subscription(
                 session, guild_id=interaction.guild.id, channel_id=target.id, repo_id=db_repo.id
             )
-            if existing is not None:
-                if not can_modify(existing.created_by, member, settings):
-                    raise UserError(
-                        f"{target.mention} is already subscribed to **{gh_repo.full_name}**. "
-                        f"Only <@{existing.created_by}>, who added it, or a manager can change it."
-                    )
-            else:
+            if existing is not None and not can_modify(existing.created_by, member, settings):
+                raise UserError(
+                    f"{target.mention} is already subscribed to **{gh_repo.full_name}**. "
+                    f"Only <@{existing.created_by}>, who added it, or a manager can change it."
+                )
+            old = _state(existing) if existing is not None else None
+            try:
+                new = plan_subscription(old, opts, max_branches=max_branches)
+            except PlanError as exc:
+                raise UserError(str(exc)) from None
+            if Kind.COMMIT in new.kinds and not settings.commits_allowed:
+                hint = (
+                    " To change this subscription, also pass `commits:false`."
+                    if old is not None and Kind.COMMIT in old.kinds
+                    else ""
+                )
+                raise UserError(f"Commit announcements aren't available in this server.{hint}")
+            if existing is None:
                 # Updates and reactivations never hit the caps: disabled subscriptions count.
                 usage = await queries.guild_usage(session, interaction.guild.id)
                 followed = await queries.guild_follows_repo(
@@ -141,45 +166,63 @@ class SubscriptionsCog(
                 )
                 if problem := cap_violation(usage, settings, repo_already_followed=followed):
                     raise UserError(problem)
-            _, created = await queries.upsert_subscription(
+            reactivated = existing is not None and not existing.active
+
+            sub, created = await queries.upsert_subscription(
                 session,
                 guild_id=interaction.guild.id,
                 channel_id=target.id,
                 repo_id=db_repo.id,
-                kinds=list(kinds),
-                branch=branch,
-                include_prereleases=prereleases,
-                created_by=interaction.user.id,
+                kinds=new.sorted_kinds,
+                branches=list(new.branches),
+                include_prereleases=new.include_prereleases,
+                created_by=member.id,
             )
-            keys = [
-                WatchKey(
-                    db_repo.id,
-                    kind,
-                    (branch or gh_repo.default_branch) if kind == Kind.COMMIT else "",
-                )
-                for kind in kinds
-            ]
+            keys = sorted(
+                needed_watches(db_repo.id, new, gh_repo.default_branch),
+                key=lambda k: (k.kind, k.branch),
+            )
             for key in keys:
                 await queries.ensure_watch(
                     session, key, initial_interval=self.bot.settings.poll_default_interval
                 )
-            if not created:
-                # Settings may have changed (e.g. dropped commits); remove watches nobody needs.
+            if old is not None:
+                removed = removed_by_update(old, new, gh_repo.default_branch)
+                if removed:
+                    await queries.skip_removed_deliveries(
+                        session,
+                        sub.id,
+                        kinds=removed.kinds,
+                        commit_branches=removed.commit_branches,
+                        prereleases=removed.prereleases,
+                    )
+                # Remove watches nobody needs anymore (a dropped kind or branch).
                 await queries.prune_orphans(session)
             usage = await queries.guild_usage(session, interaction.guild.id)
 
         latest_release = await self._baseline(keys, gh_repo)
 
-        verb = "Subscribed" if created else "Updated the subscription for"
-        what = ", ".join(KIND_LABELS[Kind(k)] for k in kinds)
-        lines = [
-            f"{verb} {target.mention} to **[{gh_repo.full_name}](<{gh_repo.html_url}>)** ({what})."
-        ]
-        if branch:
-            lines.append(f"Watching commits on `{branch}`.")
-        if prereleases and Kind.RELEASE in kinds:
-            lines.append("Pre-releases will be announced too.")
-        if Kind.RELEASE in kinds:
+        repo_link = f"**[{gh_repo.full_name}](<{gh_repo.html_url}>)**"
+        if created:
+            lines = [f"Subscribed {target.mention} to {repo_link} ({describe_state(new)})."]
+            if new.include_prereleases and Kind.RELEASE in new.kinds:
+                lines.append("Pre-releases will be announced too.")
+        else:
+            assert old is not None
+            changes = describe_changes(old, new)
+            if reactivated:
+                changes.insert(0, "Reactivated")
+            if not changes:
+                lines = [
+                    f"Nothing to change: {target.mention} already gets {repo_link} "
+                    f"({describe_state(new)})."
+                ]
+            else:
+                lines = [f"Updated {repo_link} in {target.mention}: {' · '.join(changes)}."]
+        # Preview the latest release whenever releases start being announced here.
+        if Kind.RELEASE in new.kinds and (
+            old is None or reactivated or Kind.RELEASE not in old.kinds
+        ):
             if latest_release:
                 lines.append(
                     f"Latest release: [{latest_release.name or latest_release.tag_name}]"
@@ -190,6 +233,17 @@ class SubscriptionsCog(
         if created:
             lines.append(f"-# {usage_line(usage, settings)}")
         await interaction.followup.send("\n".join(lines), ephemeral=True)
+
+    async def _check_branches_exist(self, gh_repo: Repository, names: tuple[str, ...]) -> None:
+        results = await asyncio.gather(
+            *(self.bot.github.branch_exists(gh_repo.full_name, n) for n in names)
+        )
+        missing = [n for n, ok in zip(names, results, strict=True) if not ok]
+        if missing:
+            listed = ", ".join(f"`{n}`" for n in missing)
+            noun = "Branch" if len(missing) == 1 else "Branches"
+            verb = "doesn't" if len(missing) == 1 else "don't"
+            raise UserError(f"{noun} {listed} {verb} exist in **{gh_repo.full_name}**.")
 
     async def _baseline(self, keys: list[WatchKey], gh_repo: Repository) -> Release | None:
         """Baseline new watches so subscribers aren't flooded with old items.
@@ -220,7 +274,8 @@ class SubscriptionsCog(
 
     @app_commands.command(description="Stop announcing a repo in a channel")
     @app_commands.describe(
-        repo="The subscribed repo", channel="Channel to remove it from (default: this channel)"
+        repo="The subscribed repo",
+        channel="Channel to remove it from (default: the server's default channel, else this one)",
     )
     async def unsubscribe(
         self,
@@ -229,9 +284,10 @@ class SubscriptionsCog(
         channel: discord.TextChannel | None = None,
     ) -> None:
         assert interaction.guild is not None
-        target = self._target_channel(interaction, channel)
-        full_name = parse_repo(repo) or repo.strip()
         settings = await settings_for(interaction)
+        # Same default as subscribe, so a bare subscribe/unsubscribe pair hits the same channel.
+        target = self._target_channel(interaction, channel, settings)
+        full_name = parse_repo(repo) or repo.strip()
         async with self.bot.sessions.begin() as session:
             sub = await queries.find_subscription_by_repo_name(
                 session, guild_id=interaction.guild.id, channel_id=target.id, full_name=full_name
@@ -272,17 +328,16 @@ class SubscriptionsCog(
 
         lines = []
         for sub, repo in rows:
-            kinds = ", ".join(KIND_LABELS.get(Kind(k), k) for k in sub.kinds)
+            state = _state(sub)
             extras = []
-            if sub.branch:
-                extras.append(f"branch `{sub.branch}`")
-            if sub.include_prereleases:
+            if state.include_prereleases and Kind.RELEASE in state.kinds:
                 extras.append("pre-releases")
             if not sub.active:
-                extras.append("⚠️ paused: lost access to channel, run subscribe again to resume")
+                reason = sub.disabled_reason or "lost access to the channel"
+                extras.append(f"⚠️ paused: {reason}. Run subscribe again to resume")
             suffix = f" · {' · '.join(extras)}" if extras else ""
             link = f"[{repo.full_name}](<https://github.com/{repo.full_name}>)"
-            lines.append(f"<#{sub.channel_id}> · {link} · {kinds}{suffix}")
+            lines.append(f"<#{sub.channel_id}> · {link} · {describe_state(state)}{suffix}")
         embed = discord.Embed(title="GitHub subscriptions", description="\n".join(lines)[:4096])
         embed.set_footer(text=usage_line(usage, settings))
         await interaction.response.send_message(embed=embed, ephemeral=True)
@@ -357,9 +412,19 @@ class SubscriptionsCog(
 
     @staticmethod
     def _target_channel(
-        interaction: discord.Interaction, channel: discord.TextChannel | None
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None,
+        settings: EffectiveSettings | None = None,
     ) -> discord.TextChannel:
-        target = channel or interaction.channel
+        """The `channel` option, else the server's default channel (if given `settings` and the
+        channel still exists), else the channel the command was run in."""
+        target = channel
+        if target is None and settings is not None and settings.default_channel_id:
+            assert interaction.guild is not None
+            default = interaction.guild.get_channel(settings.default_channel_id)
+            if isinstance(default, discord.TextChannel):
+                target = default
+        target = target or interaction.channel
         if not isinstance(target, discord.TextChannel):
             raise UserError("Pick a text or announcement channel with the `channel` option.")
         return target
@@ -421,6 +486,14 @@ class SubscriptionsCog(
             await interaction.followup.send(message, ephemeral=True)
         else:
             await interaction.response.send_message(message, ephemeral=True)
+
+
+def _state(sub: Subscription) -> SubscriptionState:
+    return SubscriptionState(
+        kinds=frozenset(sub.kinds),
+        branches=tuple(sub.branches),
+        include_prereleases=sub.include_prereleases,
+    )
 
 
 def _latest_release(releases: list[Release]) -> Release | None:

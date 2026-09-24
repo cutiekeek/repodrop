@@ -225,6 +225,7 @@ When a guild removes the bot, its subscriptions are deleted, and the cascades cl
 - Only the subscription's creator (`created_by`) or a manager can change it. Anyone else gets a reply saying the subscription already exists and who can modify it.
 - Only the options passed are changed; omitted options keep their current values. For example, `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` replaces the branch list, and `branches:default` goes back to following the default branch.
 - An update that would leave no event kinds on is rejected, with a pointer to `/github unsubscribe`.
+- `branches` is rejected when commits would be off, rather than stored with no effect. A branch named explicitly stays that branch even if it's the current default; only `branches:default` (or an empty list) follows the default branch when it changes.
 - A disabled subscription is reactivated and its `disabled_reason` cleared.
 - Updates don't change the server's repo or subscription counts, so those caps aren't rechecked. The branch cap still applies.
 - Pending deliveries for kinds or branches that were just removed are marked `skipped`.

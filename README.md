@@ -33,7 +33,7 @@ All under `/github`, with ephemeral replies. The group is visible to everyone; a
 
 | Command | What it does |
 |---|---|
-| `/github subscribe repo [events] [channel] [prereleases] [branch]` | Start announcing a repo. Running it again for the same channel updates the settings. You need to be able to post in the target channel yourself (managers excepted). |
+| `/github subscribe repo [channel] [releases] [tags] [commits] [branches] [prereleases]` | Start announcing a repo (releases by default). Running it again for the same repo and channel updates it, changing only the options you pass: `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` sets the commit branches, `branches:default` follows the default branch. You need to be able to post in the target channel yourself (managers excepted). |
 | `/github unsubscribe repo [channel]` | Stop announcing a repo in a channel. Your own subscriptions, or any as a manager. |
 | `/github list [channel]` | Show this server's subscriptions. |
 | `/github test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. |

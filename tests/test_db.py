@@ -24,7 +24,7 @@ def settings(**overrides) -> Settings:
     return Settings(discord_token="x", github_token="x", _env_file=None, **overrides)
 
 
-async def make_sub(session, *, kinds=("release",), channel=CHANNEL, branch=None, prereleases=False):
+async def make_sub(session, *, kinds=("release",), channel=CHANNEL, branches=(), prereleases=False):
     repo = await queries.upsert_repo(
         session, github_id=42, full_name="octo/widget", default_branch="main"
     )
@@ -34,7 +34,7 @@ async def make_sub(session, *, kinds=("release",), channel=CHANNEL, branch=None,
         channel_id=channel,
         repo_id=repo.id,
         kinds=list(kinds),
-        branch=branch,
+        branches=list(branches),
         include_prereleases=prereleases,
         created_by=USER,
     )
@@ -66,7 +66,7 @@ async def test_upserts_are_idempotent(sessions):
             channel_id=CHANNEL,
             repo_id=repo.id,
             kinds=["release", "tag"],
-            branch=None,
+            branches=[],
             include_prereleases=True,
             created_by=USER,
         )
@@ -134,7 +134,7 @@ async def test_fan_out_filters_by_kind_prerelease_and_branch(sessions):
         _, with_pre = await make_sub(s, channel=2, kinds=("release",), prereleases=True)
         _, tags_only = await make_sub(s, channel=3, kinds=("tag",))
         _, default_branch = await make_sub(s, channel=4, kinds=("commit",))
-        _, dev_branch = await make_sub(s, channel=5, kinds=("commit",), branch="dev")
+        _, dev_branch = await make_sub(s, channel=5, kinds=("commit",), branches=("dev",))
 
         async def fan_out(kind, external_id, *, branch="", prerelease=False):
             event_id = await queries.insert_event(
@@ -440,7 +440,7 @@ async def test_guild_usage_counts_distinct_repos_and_disabled(sessions):
             channel_id=1,
             repo_id=other.id,
             kinds=["release"],
-            branch=None,
+            branches=[],
             include_prereleases=False,
             created_by=USER,
         )
@@ -514,3 +514,124 @@ async def test_guild_lock_serializes_transactions(sessions):
 
     await asyncio.gather(first(), second(), other_guild())
     assert order == ["other guild locked", "first done", "second locked"]
+
+
+# --------------------------------------------------------------------------- phase 2: branches
+
+
+async def fan_out_to(s, repo, kind, *, branch="", external_id=None, prerelease=False, payload=None):
+    event_id = await queries.insert_event(
+        s,
+        repo_id=repo.id,
+        kind=kind,
+        external_id=external_id or f"{kind}:{branch}",
+        payload=payload or {},
+    )
+    await queries.fan_out_event(
+        s,
+        event_id=event_id,
+        key=WatchKey(repo.id, kind, branch),
+        default_branch="main",
+        prerelease=prerelease,
+    )
+    rows = await s.scalars(select(Delivery.subscription_id).where(Delivery.event_id == event_id))
+    return set(rows)
+
+
+async def test_fan_out_with_branch_lists(sessions):
+    async with sessions.begin() as s:
+        repo, follows_default = await make_sub(s, channel=1, kinds=("commit",))
+        _, lists_main = await make_sub(s, channel=2, kinds=("commit",), branches=("main",))
+        _, dev_and_main = await make_sub(s, channel=3, kinds=("commit",), branches=("dev", "main"))
+        _, dev_only = await make_sub(s, channel=4, kinds=("commit",), branches=("dev",))
+
+        assert await fan_out_to(s, repo, "commit", branch="main") == {
+            follows_default.id,
+            lists_main.id,
+            dev_and_main.id,
+        }
+        assert await fan_out_to(s, repo, "commit", branch="dev") == {dev_and_main.id, dev_only.id}
+        assert await fan_out_to(s, repo, "commit", branch="other") == set()
+
+
+async def test_fan_out_skips_blocked_servers_and_disallowed_commits(sessions):
+    async with sessions.begin() as s:
+        repo, releases = await make_sub(s, channel=1, kinds=("release",))
+        _, commits = await make_sub(s, channel=2, kinds=("commit",))
+
+        await queries.upsert_guild_settings(s, GUILD, commits_allowed=False)
+        assert await fan_out_to(s, repo, "release", external_id="r1") == {releases.id}
+        assert await fan_out_to(s, repo, "commit", branch="main", external_id="c1") == set()
+
+        await queries.upsert_guild_settings(s, GUILD, commits_allowed=True, blocked=True)
+        assert await fan_out_to(s, repo, "release", external_id="r2") == set()
+
+        # Subscriptions are kept, so lifting the block resumes delivery.
+        await queries.upsert_guild_settings(s, GUILD, blocked=False)
+        assert await fan_out_to(s, repo, "commit", branch="main", external_id="c2") == {commits.id}
+
+
+async def test_prune_keeps_watches_any_branch_list_needs(sessions):
+    async with sessions.begin() as s:
+        repo, _ = await make_sub(s, channel=1, kinds=("commit",))  # follows main (default)
+        await make_sub(s, channel=2, kinds=("commit",), branches=("dev",))
+        for branch in ("main", "dev", "stale"):
+            await queries.ensure_watch(
+                s, WatchKey(repo.id, "commit", branch), initial_interval=TEN_MIN
+            )
+        assert await queries.prune_orphans(s) == (1, 0)
+        remaining = await s.scalars(select(RepoWatch.branch).order_by(RepoWatch.branch))
+        assert list(remaining) == ["dev", "main"]
+
+
+async def test_skip_removed_deliveries(sessions):
+    async with sessions.begin() as s:
+        repo, sub = await make_sub(
+            s, kinds=("release", "tag", "commit"), branches=("main", "dev"), prereleases=True
+        )
+        await fan_out_to(s, repo, "tag", external_id="v1")
+        await fan_out_to(s, repo, "commit", branch="dev", payload={"branch": "dev"})
+        await fan_out_to(s, repo, "commit", branch="main", payload={"branch": "main"})
+        await fan_out_to(
+            s, repo, "release", external_id="pre", prerelease=True, payload={"prerelease": True}
+        )
+        await fan_out_to(s, repo, "release", external_id="stable", payload={"prerelease": False})
+
+        skipped = await queries.skip_removed_deliveries(
+            s, sub.id, kinds=["tag"], commit_branches=["dev"], prereleases=True
+        )
+        assert skipped == 3
+
+        rows = await s.execute(
+            select(Event.external_id, Delivery.status)
+            .join(Event, Event.id == Delivery.event_id)
+            .order_by(Event.external_id)
+        )
+        assert dict(rows.tuples().all()) == {
+            "commit:dev": "skipped",
+            "commit:main": "pending",
+            "pre": "skipped",
+            "stable": "pending",
+            "v1": "skipped",
+        }
+
+
+async def test_upsert_reactivates_and_clears_disable(sessions):
+    async with sessions.begin() as s:
+        repo, sub = await make_sub(s)
+        sub.active = False
+        sub.disabled_reason = "lost access"
+        sub.disabled_at = datetime.now(UTC)
+        await s.flush()
+        again, created = await queries.upsert_subscription(
+            s,
+            guild_id=GUILD,
+            channel_id=CHANNEL,
+            repo_id=repo.id,
+            kinds=["release"],
+            branches=[],
+            include_prereleases=False,
+            created_by=USER,
+        )
+        assert not created and again.active
+        assert again.disabled_reason is None and again.disabled_at is None
