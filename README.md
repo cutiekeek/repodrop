@@ -18,6 +18,8 @@ It can't read your messages. It uses slash commands only, with no message-conten
 
 When it joins, RepoDrop posts a short getting-started message in your server's system channel (or the first channel it can post in).
 
+If you remove RepoDrop, your server's subscriptions and settings are kept for **7 days**. Re-add it within that time and everything is restored; after that, they're deleted.
+
 ## Getting started
 
 1. In the channel where announcements should appear, run:

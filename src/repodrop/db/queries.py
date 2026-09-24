@@ -241,11 +241,6 @@ async def delete_subscription(session: AsyncSession, subscription_id: int) -> No
     await session.execute(delete(Subscription).where(Subscription.id == subscription_id))
 
 
-async def delete_guild_subscriptions(session: AsyncSession, guild_id: int) -> int:
-    result = await session.execute(delete(Subscription).where(Subscription.guild_id == guild_id))
-    return result.rowcount  # type: ignore[attr-defined]
-
-
 _DISABLE = {"active": False, "disabled_at": func.now(), "notified_at": None}
 
 
@@ -321,11 +316,44 @@ async def upsert_guild_settings(session: AsyncSession, guild_id: int, **values: 
     )
 
 
-async def delete_guild_settings_unless_blocked(session: AsyncSession, guild_id: int) -> None:
-    """Blocked rows are kept so re-inviting the bot doesn't escape the block."""
-    await session.execute(
-        delete(GuildSettings).where(GuildSettings.guild_id == guild_id, ~GuildSettings.blocked)
+async def count_guild_subscriptions(session: AsyncSession, guild_id: int) -> int:
+    stmt = select(func.count()).where(Subscription.guild_id == guild_id)
+    return (await session.scalar(stmt)) or 0
+
+
+async def guild_ids_with_subscriptions(session: AsyncSession) -> set[int]:
+    return set(await session.scalars(select(Subscription.guild_id).distinct()))
+
+
+async def departed_guild_ids(session: AsyncSession) -> set[int]:
+    return set(
+        await session.scalars(
+            select(GuildSettings.guild_id).where(GuildSettings.left_at.is_not(None))
+        )
     )
+
+
+async def purge_departed_guilds(session: AsyncSession, *, grace: timedelta) -> list[int]:
+    """Delete the data of servers the bot left more than `grace` ago.
+
+    Subscriptions go (their deliveries cascade); settings go too unless the server is blocked,
+    in which case the row stays so re-inviting doesn't escape the block. Returns the server IDs.
+    """
+    expired = list(
+        await session.scalars(
+            select(GuildSettings.guild_id).where(GuildSettings.left_at < func.now() - grace)
+        )
+    )
+    if not expired:
+        return []
+    await session.execute(delete(Subscription).where(Subscription.guild_id.in_(expired)))
+    await session.execute(
+        delete(GuildSettings).where(GuildSettings.guild_id.in_(expired), ~GuildSettings.blocked)
+    )
+    await session.execute(
+        update(GuildSettings).where(GuildSettings.guild_id.in_(expired)).values(left_at=None)
+    )
+    return expired
 
 
 # --------------------------------------------------------------------------- watches
@@ -570,6 +598,8 @@ async def fan_out_event(
             Subscription.active,
             Subscription.kinds.any_() == key.kind,
             ~func.coalesce(GuildSettings.blocked, False),
+            # The bot was removed from the server (grace period): don't queue anything for it.
+            GuildSettings.left_at.is_(None),
         )
     )
     if key.kind == Kind.COMMIT:

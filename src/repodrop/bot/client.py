@@ -4,11 +4,12 @@ import discord
 import logfire
 from discord import app_commands
 from discord.ext import commands
+from sqlalchemy import func
 
 from repodrop.announcer.dispatcher import Dispatcher
 from repodrop.bot.cogs.owner import OwnerCog
 from repodrop.bot.cogs.subscriptions import SubscriptionsCog
-from repodrop.bot.welcome import pick_welcome_channel, welcome_message
+from repodrop.bot.welcome import pick_welcome_channel, welcome_back_message, welcome_message
 from repodrop.config import Settings
 from repodrop.db import queries
 from repodrop.db.session import create_engine, create_session_factory
@@ -123,28 +124,91 @@ class RepoDropBot(commands.Bot):
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
         settings = await self.guild_settings.get(guild.id)
+        restored = await self._restore_guild(guild.id) if settings.left_at else None
         audit(
-            "joined guild {guild_id} ({guild_name})",
+            "rejoined guild {guild_id} ({guild_name}); restored {restored} subscriptions"
+            if restored is not None
+            else "joined guild {guild_id} ({guild_name})",
             level="warn" if settings.blocked else "info",
             guild_id=guild.id,
             guild_name=guild.name,
             member_count=guild.member_count,
             blocked=settings.blocked,
+            restored=restored,
         )
         if not settings.blocked:
-            await self._welcome(guild)
+            await self._welcome(guild, restored=restored)
 
-    async def _welcome(self, guild: discord.Guild) -> None:
-        """Post the getting-started message once, where the bot is allowed to."""
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        """Keep the server's setup for the grace period in case the bot is re-added."""
+        with logfire.span("guild_remove", guild_id=guild.id):
+            kept, skipped = await self._mark_departed(guild.id)
+            audit(
+                "removed from guild {guild_id} ({guild_name}); keeping {count} subscriptions "
+                "for {grace_days} days",
+                guild_id=guild.id,
+                guild_name=guild.name,
+                count=kept,
+                grace_days=self.settings.guild_removal_grace.days,
+                skipped_deliveries=skipped,
+            )
+
+    async def _mark_departed(self, guild_id: int) -> tuple[int, int]:
+        """Mark a server as left and skip its queued announcements.
+
+        Without the skip, those deliveries would fail with Forbidden and permanently disable
+        the subscriptions, so nothing would come back on re-invite. Returns
+        `(subscriptions_kept, deliveries_skipped)`.
+        """
+        await self.guild_settings.update(guild_id, left_at=func.now())
+        async with self.sessions.begin() as session:
+            kept = await queries.count_guild_subscriptions(session, guild_id)
+            skipped = await queries.skip_guild_pending_deliveries(
+                session, guild_id, "bot removed from server"
+            )
+        return kept, skipped
+
+    async def _restore_guild(self, guild_id: int) -> int:
+        """Clear a server's departure mark. Returns how many subscriptions it gets back."""
+        await self.guild_settings.update(guild_id, left_at=None)
+        async with self.sessions() as session:
+            return await queries.count_guild_subscriptions(session, guild_id)
+
+    async def _reconcile_guilds(self) -> None:
+        """Catch joins and removals that happened while the bot was offline."""
+        current = {g.id for g in self.guilds}
+        async with self.sessions() as session:
+            with_subs = await queries.guild_ids_with_subscriptions(session)
+            departed = await queries.departed_guild_ids(session)
+        for guild_id in sorted(with_subs - current - departed):
+            kept, _ = await self._mark_departed(guild_id)
+            audit(
+                "removed from guild {guild_id} while offline; keeping {count} subscriptions",
+                guild_id=guild_id,
+                count=kept,
+            )
+        for guild_id in sorted(departed & current):
+            restored = await self._restore_guild(guild_id)
+            audit(
+                "rejoined guild {guild_id} while offline; restored {restored} subscriptions",
+                guild_id=guild_id,
+                restored=restored,
+            )
+
+    async def _welcome(self, guild: discord.Guild, *, restored: int | None = None) -> None:
+        """Post the getting-started message (or a welcome back), where the bot may post."""
         channel = pick_welcome_channel(guild)
         if channel is None:
             logfire.info(
                 "no channel to post the welcome message in guild {guild_id}", guild_id=guild.id
             )
             return
-        embed, view = welcome_message(
-            await self.guild_settings.get(guild.id), self.settings.docs_url
-        )
+        if restored is not None:
+            embed, view = welcome_back_message(restored, self.settings.docs_url)
+        else:
+            embed, view = welcome_message(
+                await self.guild_settings.get(guild.id), self.settings.docs_url
+            )
         try:
             await channel.send(
                 embed=embed,
@@ -169,20 +233,10 @@ class RepoDropBot(commands.Bot):
         logfire.info(
             "logged in as {user} in {guilds} guilds", user=str(self.user), guilds=len(self.guilds)
         )
-
-    async def on_guild_remove(self, guild: discord.Guild) -> None:
-        with logfire.span("guild_remove", guild_id=guild.id):
-            async with self.sessions.begin() as session:
-                deleted = await queries.delete_guild_subscriptions(session, guild.id)
-                await queries.delete_guild_settings_unless_blocked(session, guild.id)
-                await queries.prune_orphans(session)
-            self.guild_settings.invalidate(guild.id)
-            audit(
-                "removed from guild {guild_id} ({guild_name}); deleted {count} subscriptions",
-                guild_id=guild.id,
-                guild_name=guild.name,
-                count=deleted,
-            )
+        try:
+            await self._reconcile_guilds()
+        except Exception:
+            logfire.exception("reconciling guild membership failed")
 
     async def close(self) -> None:
         logfire.info("shutting down")

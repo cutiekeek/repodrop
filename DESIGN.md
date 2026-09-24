@@ -187,7 +187,7 @@ CREATE TABLE guild_settings (
 );
 ```
 
-When a guild removes the bot, its subscriptions are deleted, and the cascades clean up their deliveries. Its `guild_settings` row is deleted too, **unless the server is blocked**: blocked rows are kept so that re-inviting the bot doesn't escape the block. Orphaned repos (no subscriptions left) and watches that no subscription needs anymore (a removed kind or branch) are pruned by a periodic cleanup task.
+When a guild removes the bot, nothing is deleted right away: its `guild_settings.left_at` is set, its pending deliveries are marked `skipped` (otherwise they'd fail with `Forbidden` and disable the subscriptions), and fan-out skips it. Re-adding the bot within the grace period (`GUILD_REMOVAL_GRACE`, 7 days) clears `left_at` and restores everything, with a "welcome back" message. After the grace period, the maintenance task deletes the guild's subscriptions (the cascades clean up their deliveries) and its `guild_settings` row, **unless the server is blocked**: blocked rows are kept so that re-inviting the bot doesn't escape the block. At startup the bot reconciles its guild list with the database, so removals and re-adds that happened while it was offline are caught too. Orphaned repos (no subscriptions left) and watches that no subscription needs anymore (a removed kind or branch) are pruned by a periodic cleanup task.
 
 ## 8. Core Flows
 
@@ -405,7 +405,7 @@ Members can remove subscriptions they created (matched on `created_by`), and man
 
 - Enforce embed limits: a 4096-character description (truncate release notes and link to the full release) and a 256-character title.
 - Disable all mentions so release notes can never ping anyone.
-- Use `on_guild_remove` to delete that guild's subscriptions and settings, keeping the settings row if the server is blocked.
+- Use `on_guild_remove` to start that guild's grace period, and delete its subscriptions and settings once the grace period ends (keeping the settings row if the server is blocked).
 - Switch to `AutoShardedBot` as the bot grows. Discord requires verification at 100 servers.
 
 ### Configuration (`pydantic-settings`)

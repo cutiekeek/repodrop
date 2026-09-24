@@ -2,6 +2,7 @@
 
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from repodrop.config import Settings
@@ -30,6 +31,9 @@ class EffectiveSettings:
     latest_access: str = LatestAccess.EVERYONE
     latest_allow_public: bool = True
 
+    # When the bot was removed from the server (None while it's a member).
+    left_at: datetime | None = None
+
     @classmethod
     def resolve(
         cls, guild_id: int, row: GuildSettings | None, config: Settings
@@ -57,6 +61,7 @@ class EffectiveSettings:
             embed_style=row.embed_style,
             latest_access=row.latest_access,
             latest_allow_public=row.latest_allow_public,
+            left_at=row.left_at,
         )
 
 

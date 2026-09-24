@@ -72,6 +72,9 @@ class Settings(DatabaseSettings):
     maintenance_interval: timedelta = timedelta(hours=1)
     # How often each repo's metadata (name, default branch) is re-checked.
     metadata_refresh_interval: timedelta = timedelta(days=1)
+    # How long a server's subscriptions and settings are kept after the bot is removed, so
+    # re-adding it restores everything.
+    guild_removal_grace: timedelta = timedelta(days=7)
 
     @field_validator(
         "poll_min_interval",
@@ -82,6 +85,7 @@ class Settings(DatabaseSettings):
         "maintenance_interval",
         "guild_settings_cache_ttl",
         "metadata_refresh_interval",
+        "guild_removal_grace",
         mode="before",
     )
     @classmethod

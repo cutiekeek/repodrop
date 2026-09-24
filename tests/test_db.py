@@ -218,8 +218,13 @@ async def test_prune_orphans_and_guild_removal(sessions):
         # tag and commit@dev aren't wanted by any subscription.
         assert await queries.prune_orphans(s) == (2, 0)
 
+    # The bot left the server long ago: the purge deletes its subscriptions, then pruning
+    # removes the repo and its watches (events and deliveries cascade).
     async with sessions.begin() as s:
-        assert await queries.delete_guild_subscriptions(s, GUILD) == 1
+        await queries.upsert_guild_settings(
+            s, GUILD, left_at=datetime.now(UTC) - timedelta(days=30)
+        )
+        assert await queries.purge_departed_guilds(s, grace=timedelta(days=7)) == [GUILD]
         assert await queries.prune_orphans(s) == (2, 1)
 
     async with sessions() as s:
@@ -649,14 +654,46 @@ async def test_settings_cache_defaults_updates_and_invalidation(sessions):
     assert (await cache.get(GUILD)).blocked_reason == "spam"
 
 
-async def test_guild_removal_keeps_settings_only_when_blocked(sessions):
+async def test_purge_waits_for_grace_and_keeps_blocked_settings(sessions):
+    week = timedelta(days=7)
+    long_ago = datetime.now(UTC) - timedelta(days=8)
     async with sessions.begin() as s:
-        await queries.upsert_guild_settings(s, 1, manager_role_id=5)
-        await queries.upsert_guild_settings(s, 2, blocked=True, blocked_reason="abuse")
-        await queries.delete_guild_settings_unless_blocked(s, 1)
-        await queries.delete_guild_settings_unless_blocked(s, 2)
+        repo = await queries.upsert_repo(s, github_id=5, full_name="o/r", default_branch="main")
+        for guild_id in (1, 2, 3):
+            await queries.upsert_subscription(
+                s,
+                guild_id=guild_id,
+                channel_id=guild_id,
+                repo_id=repo.id,
+                kinds=["release"],
+                branches=[],
+                include_prereleases=False,
+                created_by=1,
+            )
+        await queries.upsert_guild_settings(s, 1, manager_role_id=5, left_at=long_ago)
+        await queries.upsert_guild_settings(
+            s, 2, blocked=True, blocked_reason="abuse", left_at=long_ago
+        )
+        # Server 3 left yesterday: still inside the grace period.
+        await queries.upsert_guild_settings(s, 3, left_at=datetime.now(UTC) - timedelta(days=1))
+
+        assert sorted(await queries.purge_departed_guilds(s, grace=week)) == [1, 2]
         assert await queries.get_guild_settings(s, 1) is None
-        assert (await queries.get_guild_settings(s, 2)).blocked_reason == "abuse"
+        blocked = await queries.get_guild_settings(s, 2)
+        assert blocked.blocked_reason == "abuse" and blocked.left_at is None  # block survives
+        assert await queries.guild_ids_with_subscriptions(s) == {3}
+        assert await queries.departed_guild_ids(s) == {3}
+        # Nothing more to purge on the next run.
+        assert await queries.purge_departed_guilds(s, grace=week) == []
+
+
+async def test_departed_servers_get_no_new_deliveries(sessions):
+    async with sessions.begin() as s:
+        repo, sub = await make_sub(s)
+        await queries.upsert_guild_settings(s, GUILD, left_at=datetime.now(UTC))
+        assert await fan_out_to(s, repo, "release", external_id="while-away") == set()
+        await queries.upsert_guild_settings(s, GUILD, left_at=None)
+        assert await fan_out_to(s, repo, "release", external_id="back") == {sub.id}
 
 
 async def test_guild_lock_serializes_transactions(sessions):

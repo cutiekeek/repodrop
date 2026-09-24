@@ -5,6 +5,7 @@ Three layers keep them private: they're registered only in the operator's own se
 OWNER_IDS, so even another admin of that server can't run them.
 """
 
+from datetime import timedelta
 from typing import TYPE_CHECKING
 
 import discord
@@ -189,6 +190,7 @@ class OwnerCog(
                     if settings.blocked
                     else "Not blocked"
                 )
+                + (_departure(settings, config.guild_removal_grace) if settings.left_at else "")
             ),
             inline=False,
         )
@@ -225,6 +227,13 @@ class OwnerCog(
         self, interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
         await reply_with_error(interaction, error)
+
+
+def _departure(settings: EffectiveSettings, grace: timedelta) -> str:
+    assert settings.left_at is not None
+    removed = int(settings.left_at.timestamp())
+    deleted = int((settings.left_at + grace).timestamp())
+    return f"\nBot removed <t:{removed}:R>; data is deleted <t:{deleted}:R>"
 
 
 def _cap(override: int | None, default: int) -> str:

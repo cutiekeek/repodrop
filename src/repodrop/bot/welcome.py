@@ -34,6 +34,25 @@ def pick_welcome_channel(guild: discord.Guild) -> discord.TextChannel | None:
     return None
 
 
+def welcome_back_message(
+    restored: int, docs_url: str | None
+) -> tuple[discord.Embed, discord.ui.View | None]:
+    """Posted when RepoDrop is re-added within the grace period and nothing was lost."""
+    plural = "subscription" if restored == 1 else "subscriptions"
+    embed = discord.Embed(
+        title="Welcome back!",
+        description=(
+            f"RepoDrop was re-added within the grace period, so your {restored} {plural} and "
+            "settings were restored. Announcements resume from now on; updates from while I "
+            "was away aren't posted.\n\n`/repodrop list` shows what's restored, and "
+            "`/repodrop status` checks that I can still post in each channel."
+        ),
+        color=WELCOME_COLOR,
+    )
+    view = link_view([("Getting started", docs_url)]) if docs_url else None
+    return embed, view
+
+
 def welcome_message(
     settings: EffectiveSettings, docs_url: str | None
 ) -> tuple[discord.Embed, discord.ui.View | None]:

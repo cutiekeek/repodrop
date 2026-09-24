@@ -22,6 +22,7 @@ from repodrop.github.client import (
     RateLimitedError,
 )
 from repodrop.github.schemas import Repository
+from repodrop.observability import audit
 from repodrop.poller import detectors
 from repodrop.poller.detectors import Detection, RepoRef
 
@@ -81,7 +82,16 @@ class Poller:
                 with logfire.span("maintenance"):
                     await self.refresh_metadata()
                     async with self._sessions.begin() as session:
+                        purged = await queries.purge_departed_guilds(
+                            session, grace=self._settings.guild_removal_grace
+                        )
                         watches, repos = await queries.prune_orphans(session)
+                    for guild_id in purged:
+                        audit(
+                            "deleted data for guild {guild_id}: the grace period after removal "
+                            "ended",
+                            guild_id=guild_id,
+                        )
                     logfire.info(
                         "pruned {watches} orphan watches and {repos} orphan repos",
                         watches=watches,

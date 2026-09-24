@@ -179,4 +179,8 @@ class GuildSettings(Base):
     latest_access: Mapped[str] = mapped_column(Text, server_default=LatestAccess.EVERYONE.value)
     latest_allow_public: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
 
+    # Set when the bot is removed from the server. Its subscriptions and settings are kept for
+    # a grace period (GUILD_REMOVAL_GRACE) in case it's re-added, then deleted.
+    left_at: Mapped[datetime | None] = mapped_column()
+
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now())
