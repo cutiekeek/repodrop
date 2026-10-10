@@ -27,7 +27,7 @@ If you remove RepoDrop, your server's subscriptions and settings are kept for **
    /repodrop subscribe repo:owner/name
    ```
    `repo` also accepts a GitHub URL. You get releases by default; add `tags:true` or `commits:true` for more.
-2. RepoDrop records the repo's current state, so nothing old is re-announced. New releases are posted from now on, usually within 5–10 minutes (up to about an hour for very quiet repos).
+2. RepoDrop records the repo's current state, so nothing old is re-announced. New releases are posted from now on, usually within 5-10 minutes (up to about an hour for very quiet repos).
 3. Check your setup with `/repodrop list`, and preview how an announcement looks with `/repodrop test repo:owner/name`.
 
 A few more examples:
