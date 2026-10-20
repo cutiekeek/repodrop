@@ -56,7 +56,7 @@ All under `/repodrop`, with replies only you can see. Everyone can see the comma
 | `/repodrop status [channel]` | Health report: what each subscription posts, when it last posted and was checked, and any problems (missing permissions, deleted branches, disabled subscriptions). Managers only. |
 | `/repodrop latest repo [public]` | Show a repo's newest release (or newest tag) with its buttons, no subscription needed. Only you see it unless you pass `public:true`. Servers can limit it to managers or turn off public posts. |
 | `/repodrop settings` | Settings panel: manager role, subscriber role, default channel, embed style, and who can use `/repodrop latest`. Changes save immediately. Managers only; changing the manager role needs Manage Server. |
-| `/repodrop test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. |
+| `/repodrop test repo [channel]` | Post the repo's latest release to check formatting and permissions. Managers only. This only tests releases and tags does not include commits. |
 
 Announcements carry link buttons: **View release** / **View tag** / **View commits**, plus **Compare** against the previous version. Servers can choose a compact style (no release notes).
 
@@ -64,7 +64,7 @@ When a subscription is disabled automatically (the channel was deleted, the bot 
 
 ### Limits
 
-Each server can follow up to **25 repos** across up to **100 subscriptions** (a subscription is one repo in one channel), and a commit subscription can follow up to **5 branches**. Only public repositories are supported.
+Each server can follow up to **25 repos** across up to **100 subscriptions** (a subscription is one repo in one channel), and a commit subscription can follow up to **5 branches**. Only public repositories are supported. Polling rates start at 1 minute then each poll that has no update increases the poll time X 1.5 until 30 minutes.
 
 ---
 
