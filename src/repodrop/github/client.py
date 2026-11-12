@@ -19,9 +19,13 @@ from repodrop.github.schemas import (
 )
 
 API_URL = "https://api.github.com"
-# GitHub's maximum page size. Anything beyond one page between two polls is never seen.
-RELEASES_PER_PAGE = 100
-TAGS_PER_PAGE = 100
+# A release list carries every file's download counter, so it is large (megabytes at 100
+# per page for some repos) and its ETag changes whenever a file is downloaded: popular
+# repos answer most polls in full, not with a 304. So polls ask for a small page, and only
+# fetch the big one when the small one can't have shown everything new.
+RELEASES_PER_PAGE = 10
+RELEASES_CATCH_UP = 100  # GitHub's maximum page size
+TAGS_PER_PAGE = 100  # tags are tiny, so always the maximum
 
 
 class GitHubError(Exception):

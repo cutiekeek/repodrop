@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote
 
-from repodrop.github.client import TAGS_PER_PAGE
+from repodrop.github.client import RELEASES_PER_PAGE, TAGS_PER_PAGE
 from repodrop.github.schemas import Commit, Release, Tag
 
 MAX_BODY_CHARS = 6000
@@ -100,6 +100,15 @@ def detect_releases(repo: RepoRef, releases: list[Release], last_seen: str) -> D
             )
             for r in new
         ],
+    )
+
+
+def page_is_all_new(releases: list[Release], last_seen: str) -> bool:
+    """A full page with nothing as old as the watermark: more new releases may lie beyond it."""
+    since = datetime.fromisoformat(last_seen) if last_seen else None
+    return len(releases) >= RELEASES_PER_PAGE and all(
+        since is None or r.published_at > since  # type: ignore[operator]
+        for r in _published(releases)
     )
 
 

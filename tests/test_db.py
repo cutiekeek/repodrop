@@ -278,17 +278,19 @@ class FakeGitHub:
         self.etag = '"1"'
         self.error: Exception | None = None
         self.seen_etags: list[str | None] = []
+        self.page_sizes: list[int] = []
         self.repo: Repository | None = gh_repo()  # None = gone (404 by ID)
         self.metadata_etag = '"m1"'
         self.branches = {"main"}
 
-    async def list_releases(self, full_name, *, etag=None):
+    async def list_releases(self, full_name, *, etag=None, per_page=10):
         self.seen_etags.append(etag)
+        self.page_sizes.append(per_page)
         if self.error:
             raise self.error
         if etag == self.etag:
             return Conditional(items=None, etag=etag)
-        return Conditional(items=list(self.releases), etag=self.etag)
+        return Conditional(items=list(self.releases[:per_page]), etag=self.etag)
 
     async def list_commits(self, full_name, branch, *, etag=None):
         if self.error:
@@ -360,6 +362,34 @@ async def test_poller_baseline_detect_and_not_modified(sessions):
         assert watch.last_seen_id == (t0 + timedelta(hours=2)).isoformat()
         assert watch.etag == '"2"'
         assert watch.poll_interval == timedelta(minutes=1)  # changed: back to the minimum
+
+
+async def test_poller_fetches_the_big_page_only_when_a_whole_page_is_new(sessions):
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    gh = FakeGitHub()
+    poller = Poller(settings(), sessions, gh, asyncio.Event())
+    async with sessions.begin() as s:
+        repo, _ = await make_sub(s)
+    key = WatchKey(repo.id, "release", "")
+    await due_watch(sessions, key, last_seen=t0.isoformat())
+
+    # 12 releases at once: the usual page of 10 holds only new ones, so more may lie beyond
+    # it and the big page is fetched too.
+    gh.releases = [gh_release(n, t0 + timedelta(minutes=n)) for n in range(12, 0, -1)]
+    await poller.run_cycle()
+    async with sessions() as s:
+        assert len((await s.scalars(select(Event))).all()) == 12
+    assert gh.page_sizes == [10, 100]
+
+    # One more release: the small page also shows ones already seen, so it's enough.
+    gh.releases.insert(0, gh_release(13, t0 + timedelta(minutes=13)))
+    gh.etag = '"2"'
+    async with sessions.begin() as s:
+        await make_due(s, key)
+    await poller.run_cycle()
+    async with sessions() as s:
+        assert len((await s.scalars(select(Event))).all()) == 13
+    assert gh.page_sizes == [10, 100, 10]
 
 
 async def test_prerelease_marked_stable_later_reaches_subscriptions_without_prereleases(sessions):

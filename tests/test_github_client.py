@@ -48,7 +48,7 @@ async def test_ok_parses_items_and_tracks_the_rate_limit():
     assert client.rate_limit.remaining == 4999
     assert client.rate_limit.reset_at == datetime.fromtimestamp(100, UTC)
     assert seen[0].headers["Authorization"] == "Bearer secret-token"
-    assert seen[0].url.params["per_page"] == "100"
+    assert seen[0].url.params["per_page"] == "10"
 
 
 async def test_not_modified_keeps_the_etag_it_sent():

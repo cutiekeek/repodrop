@@ -14,6 +14,7 @@ from repodrop.db.models import Kind, Repo
 from repodrop.db.queries import ClaimedWatch, WatchKey
 from repodrop.db.session import SessionFactory
 from repodrop.github.client import (
+    RELEASES_CATCH_UP,
     Conditional,
     GitHubClient,
     GitHubError,
@@ -151,6 +152,18 @@ class Poller:
         ) as span:
             try:
                 result = await self._fetch(key, repo.full_name, watch.etag)
+                if (
+                    key.kind == Kind.RELEASE
+                    and result.items is not None
+                    and watch.last_seen_id is not None
+                    and detectors.page_is_all_new(result.items, watch.last_seen_id)
+                ):
+                    # More new releases than the small page shows: get the big page once.
+                    # Inside the try, so a failure here retries the whole poll later instead
+                    # of moving the watermark past releases that were never seen.
+                    result.items = (
+                        await self._github.list_releases(repo.full_name, per_page=RELEASES_CATCH_UP)
+                    ).items
             except RateLimitedError as exc:
                 span.set_attribute("result", "rate_limited")
                 logfire.warn(
