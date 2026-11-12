@@ -444,6 +444,13 @@ class SubscriptionsCog(
         if public and not settings.latest_allow_public:
             public = False
             note = "-# Public posts are turned off in this server, so only you can see this."
+        elif public and not (
+            interaction.permissions.send_messages or is_manager(interaction.user, settings)  # type: ignore[arg-type]
+        ):
+            # Slash commands work in channels a member can't post in, so check it ourselves:
+            # nobody gets the bot to post somewhere they can't (the same rule as subscribe).
+            public = False
+            note = "-# You can't post in this channel, so only you can see this."
 
         await interaction.response.defer(ephemeral=not public, thinking=True)
         kind, payload = await self._latest_payload(repo)

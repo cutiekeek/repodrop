@@ -305,6 +305,7 @@ A quick lookup of a repo's newest release that doesn't require a subscription.
 1. A member runs `/repodrop latest repo:owner/name`, with autocomplete from the server's subscribed repos.
    - If `latest_access` is `managers`, non-managers get an ephemeral "only managers can use this here" reply.
    - If `public:true` is passed but `latest_allow_public` is false, the bot answers ephemerally and says public posts are turned off in this server.
+   - If `public:true` is passed by a member who can't send messages in the channel (slash commands work in read-only channels), the bot answers ephemerally too. Managers are exempt, as with subscribing.
 2. It calls `GET /repos/{o}/{r}/releases/latest`, which already excludes drafts and prereleases, and falls back to the newest tag if the repo has no releases. (Stored data isn't used: baselining records only a watermark, so the bot has no release details for a repo until it announces one.)
 3. It replies with the standard release embed and buttons. The reply is ephemeral by default, and a `public:true` option posts it visibly in the channel.
 

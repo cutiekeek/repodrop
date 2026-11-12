@@ -239,7 +239,7 @@ async def test_latest_with_nothing_to_show():
         await cog_with(FakeGitHub())._latest_payload("octo/widget")
 
 
-def interaction_for(settings: EffectiveSettings, *, manager: bool):
+def interaction_for(settings: EffectiveSettings, *, manager: bool, can_send: bool = True):
     member = SimpleNamespace(
         id=5, guild_permissions=discord.Permissions(manage_guild=manager), roles=[]
     )
@@ -247,6 +247,7 @@ def interaction_for(settings: EffectiveSettings, *, manager: bool):
     return SimpleNamespace(
         guild_id=1,
         user=member,
+        permissions=discord.Permissions(send_messages=can_send),  # the member's, in the channel
         client=SimpleNamespace(guild_settings=cache),
         response=SimpleNamespace(defer=AsyncMock()),
         followup=SimpleNamespace(send=AsyncMock()),
@@ -277,6 +278,22 @@ async def test_test_command_posts_newest_tag_when_there_are_no_releases():
     await cog.test.callback(cog, interaction, "octo/widget", channel)
     assert channel.send.await_args.kwargs["embed"].title == "New tag v9"
     interaction.followup.send.assert_awaited_once()
+
+
+async def test_latest_public_needs_permission_to_post_in_the_channel():
+    cog = cog_with(FakeGitHub(releases=[release(1, 10)]))
+    # Slash commands work in read-only channels, so without this check a member could have
+    # the bot post there for them.
+    muted = interaction_for(settings(), manager=False, can_send=False)
+    await cog.latest.callback(cog, muted, "octo/widget", public=True)
+    muted.response.defer.assert_awaited_once_with(ephemeral=True, thinking=True)
+    kwargs = muted.followup.send.await_args.kwargs
+    assert kwargs["ephemeral"] is True and "can't post" in kwargs["content"]
+
+    # Managers are exempt, as with subscribe.
+    manager = interaction_for(settings(), manager=True, can_send=False)
+    await cog.latest.callback(cog, manager, "octo/widget", public=True)
+    manager.response.defer.assert_awaited_once_with(ephemeral=False, thinking=True)
 
 
 async def test_latest_public_turned_off_answers_privately_with_note():
