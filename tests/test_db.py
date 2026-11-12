@@ -392,6 +392,43 @@ async def test_poller_fetches_the_big_page_only_when_a_whole_page_is_new(session
     assert gh.page_sizes == [10, 100, 10]
 
 
+async def test_maintenance_pass_cleans_up_everything_that_is_due(sessions):
+    poller = Poller(settings(), sessions, FakeGitHub(), asyncio.Event())
+    long_ago = datetime.now(UTC) - timedelta(days=120)
+    async with sessions.begin() as s:
+        repo, kept = await make_sub(s)
+        await queries.ensure_watch(s, WatchKey(repo.id, "release", ""), initial_interval=TEN_MIN)
+        # A watch no subscription wants, a server the bot left long ago, and an old event.
+        await queries.ensure_watch(s, WatchKey(repo.id, "tag", ""), initial_interval=TEN_MIN)
+        await queries.upsert_subscription(
+            s,
+            guild_id=GUILD + 1,
+            channel_id=9,
+            repo_id=repo.id,
+            kinds=["release"],
+            branches=[],
+            include_prereleases=False,
+            created_by=USER,
+        )
+        await queries.upsert_guild_settings(s, GUILD + 1, left_at=long_ago)
+        for external_id in ("old", "new"):
+            await queries.insert_event(
+                s, repo_id=repo.id, kind="release", external_id=external_id, payload={}
+            )
+        await s.execute(
+            update(Event).where(Event.external_id == "old").values(detected_at=long_ago)
+        )
+
+    await poller.maintain()
+
+    async with sessions() as s:
+        assert [sub.id for sub in await s.scalars(select(Subscription))] == [kept.id]
+        assert await queries.get_guild_settings(s, GUILD + 1) is None
+        assert [w.kind for w in await s.scalars(select(RepoWatch))] == ["release"]
+        assert list(await s.scalars(select(Event.external_id))) == ["new"]
+        assert (await s.get(Repo, repo.id)).metadata_checked_at is not None
+
+
 async def test_prerelease_marked_stable_later_reaches_subscriptions_without_prereleases(sessions):
     t0 = datetime(2026, 1, 1, tzinfo=UTC)
     gh = FakeGitHub()

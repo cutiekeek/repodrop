@@ -86,30 +86,32 @@ class Poller:
     async def run_maintenance(self) -> None:
         while True:
             try:
-                with logfire.span("maintenance"):
-                    await self.refresh_metadata()
-                    async with self._sessions.begin() as session:
-                        purged = await queries.purge_departed_guilds(
-                            session, grace=self._settings.guild_removal_grace
-                        )
-                        watches, repos = await queries.prune_orphans(session)
-                        events = await queries.prune_old_events(session, older_than=EVENT_RETENTION)
-                    for guild_id in purged:
-                        audit(
-                            "deleted data for guild {guild_id}: the grace period after removal "
-                            "ended",
-                            guild_id=guild_id,
-                        )
-                    logfire.info(
-                        "pruned {watches} orphan watches, {repos} orphan repos and {events} old "
-                        "events",
-                        watches=watches,
-                        repos=repos,
-                        events=events,
-                    )
+                await self.maintain()
             except Exception:
                 logfire.exception("maintenance failed")
             await asyncio.sleep(self._settings.maintenance_interval.total_seconds())
+
+    async def maintain(self) -> None:
+        """One maintenance pass: refresh repo metadata, then delete what's no longer needed."""
+        with logfire.span("maintenance"):
+            await self.refresh_metadata()
+            async with self._sessions.begin() as session:
+                purged = await queries.purge_departed_guilds(
+                    session, grace=self._settings.guild_removal_grace
+                )
+                watches, repos = await queries.prune_orphans(session)
+                events = await queries.prune_old_events(session, older_than=EVENT_RETENTION)
+            for guild_id in purged:
+                audit(
+                    "deleted data for guild {guild_id}: the grace period after removal ended",
+                    guild_id=guild_id,
+                )
+            logfire.info(
+                "pruned {watches} orphan watches, {repos} orphan repos and {events} old events",
+                watches=watches,
+                repos=repos,
+                events=events,
+            )
 
     async def run_cycle(self) -> int:
         with logfire.span("poll_cycle") as span:
