@@ -1,35 +1,22 @@
 """The welcome message posted once when RepoDrop is added to a server."""
 
-from typing import Protocol
-
 import discord
 
 from repodrop.announcer.embeds import link_view
+from repodrop.bot.checks import missing_permissions
 from repodrop.guild_settings import EffectiveSettings
 
-REQUIRED = ("view_channel", "send_messages", "embed_links")
 WELCOME_COLOR = discord.Color.from_rgb(46, 160, 67)
-
-
-class _Channel(Protocol):
-    position: int
-
-    def permissions_for(self, member: discord.Member, /) -> discord.Permissions: ...
-
-
-def _can_post(channel: _Channel, me: discord.Member) -> bool:
-    have = channel.permissions_for(me)
-    return all(getattr(have, p) for p in REQUIRED)
 
 
 def pick_welcome_channel(guild: discord.Guild) -> discord.TextChannel | None:
     """The server's system channel if the bot can post there, else the first text channel
     (by position) where it can. None if there's nowhere to post."""
     me = guild.me
-    if guild.system_channel is not None and _can_post(guild.system_channel, me):
+    if guild.system_channel is not None and not missing_permissions(guild.system_channel, me):
         return guild.system_channel
     for channel in sorted(guild.text_channels, key=lambda c: c.position):
-        if _can_post(channel, me):
+        if not missing_permissions(channel, me):
             return channel
     return None
 

@@ -14,7 +14,7 @@ from discord.ext import commands
 from sqlalchemy import func
 
 from repodrop.announcer.embeds import truncate
-from repodrop.bot.checks import AccessDenied, is_owner
+from repodrop.bot.checks import AccessDenied, is_owner, role_mention
 from repodrop.bot.errors import UserError, reply_with_error
 from repodrop.db import queries
 from repodrop.guild_settings import EffectiveSettings, usage_line
@@ -241,12 +241,9 @@ def _cap(override: int | None, default: int) -> str:
 
 
 def _admin_summary(s: EffectiveSettings) -> str:
-    def role(role_id: int | None, default: str) -> str:
-        return f"<@&{role_id}>" if role_id else default
-
     return (
-        f"Manager role: {role(s.manager_role_id, 'none (Manage Server only)')}\n"
-        f"Subscriber role: {role(s.subscriber_role_id, 'none (everyone)')}\n"
+        f"Manager role: {role_mention(s.manager_role_id, 'none (Manage Server only)')}\n"
+        f"Subscriber role: {role_mention(s.subscriber_role_id, 'none (everyone)')}\n"
         f"Default channel: {f'<#{s.default_channel_id}>' if s.default_channel_id else 'none'}\n"
         f"Embed style: {s.embed_style} · /repodrop latest: {s.latest_access}"
         f"{'' if s.latest_allow_public else ', private only'}"

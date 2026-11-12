@@ -70,11 +70,14 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(UTC).isoformat()
 
 
+def latest_release(releases: list[Release]) -> Release | None:
+    """The most recently published release, if there is one."""
+    return max(_published(releases), key=lambda r: r.published_at, default=None)  # type: ignore[arg-type, return-value]
+
+
 def baseline_releases(releases: list[Release]) -> str:
-    published = _published(releases)
-    if not published:
-        return ""
-    return _iso(max(r.published_at for r in published))  # type: ignore[type-var]
+    latest = latest_release(releases)
+    return _iso(latest.published_at) if latest else ""  # type: ignore[arg-type]
 
 
 def detect_releases(repo: RepoRef, releases: list[Release], last_seen: str) -> Detection:

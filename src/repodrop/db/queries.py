@@ -473,11 +473,7 @@ async def update_watch(
 ) -> None:
     await session.execute(
         update(RepoWatch)
-        .where(
-            RepoWatch.repo_id == key.repo_id,
-            RepoWatch.kind == key.kind,
-            RepoWatch.branch == key.branch,
-        )
+        .where(_watch_is(key))
         .values(
             etag=etag,
             last_seen_id=last_seen_id,

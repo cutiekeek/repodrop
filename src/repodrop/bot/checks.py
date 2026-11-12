@@ -20,8 +20,26 @@ if TYPE_CHECKING:
     from repodrop.bot.client import RepoDropBot
 
 
+# What the bot needs in a channel to post announcements there.
+REQUIRED_PERMISSIONS = ("view_channel", "send_messages", "embed_links")
+
+
 class AccessDenied(app_commands.CheckFailure):
     """Shown to the invoking member as-is."""
+
+
+class _Channel(Protocol):
+    def permissions_for(self, member: discord.Member, /) -> discord.Permissions: ...
+
+
+def missing_permissions(channel: _Channel, bot_member: discord.Member) -> list[str]:
+    """The bot's missing required permissions in a channel, as display names."""
+    have = channel.permissions_for(bot_member)
+    return [p.replace("_", " ").title() for p in REQUIRED_PERMISSIONS if not getattr(have, p)]
+
+
+def role_mention(role_id: int | None, default: str) -> str:
+    return f"<@&{role_id}>" if role_id else default
 
 
 class _MemberLike(Protocol):

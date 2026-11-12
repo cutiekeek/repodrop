@@ -7,7 +7,7 @@ update only the options actually passed change.
 import re
 from dataclasses import dataclass
 
-from repodrop.db.models import Kind
+from repodrop.db.models import Kind, Subscription
 from repodrop.db.queries import WatchKey
 
 KIND_ORDER = (Kind.RELEASE, Kind.TAG, Kind.COMMIT)
@@ -26,6 +26,14 @@ class SubscriptionState:
     kinds: frozenset[str]
     branches: tuple[str, ...] = ()  # commit branches; empty = follow the default branch
     include_prereleases: bool = False
+
+    @classmethod
+    def of(cls, sub: Subscription) -> "SubscriptionState":
+        return cls(
+            kinds=frozenset(sub.kinds),
+            branches=tuple(sub.branches),
+            include_prereleases=sub.include_prereleases,
+        )
 
     @property
     def sorted_kinds(self) -> list[str]:

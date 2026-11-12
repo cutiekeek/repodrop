@@ -8,13 +8,12 @@ from typing import Protocol
 
 import discord
 
-from repodrop.bot.checks import is_manager
+from repodrop.bot.checks import is_manager, missing_permissions, role_mention
 from repodrop.db.models import EmbedStyle, LatestAccess
 from repodrop.guild_settings import EffectiveSettings
 from repodrop.observability import audit
 
 PANEL_TIMEOUT = 300
-REQUIRED_CHANNEL_PERMISSIONS = ("view_channel", "send_messages", "embed_links")
 
 # value -> (label, latest_access, latest_allow_public)
 LATEST_CHOICES: dict[str, tuple[str, str, bool]] = {
@@ -54,11 +53,7 @@ def channel_problem(channel: object, bot_member: discord.Member) -> str | None:
         return None
     if not isinstance(channel, discord.TextChannel):
         return "Pick a text or announcement channel."
-    have = channel.permissions_for(bot_member)
-    missing = [
-        p.replace("_", " ").title() for p in REQUIRED_CHANNEL_PERMISSIONS if not getattr(have, p)
-    ]
-    if missing:
+    if missing := missing_permissions(channel, bot_member):
         return f"I'm missing {', '.join(missing)} in {channel.mention}."
     return None
 
@@ -74,9 +69,6 @@ def latest_choice(settings: EffectiveSettings) -> str:
 def panel_embed(
     settings: EffectiveSettings, usage_text: str, notice: str | None = None
 ) -> discord.Embed:
-    def role(role_id: int | None, default: str) -> str:
-        return f"<@&{role_id}>" if role_id else default
-
     embed = discord.Embed(
         title="RepoDrop settings",
         description=notice,
@@ -84,12 +76,12 @@ def panel_embed(
     )
     embed.add_field(
         name="Manager role",
-        value=role(settings.manager_role_id, "None: only Manage Server"),
+        value=role_mention(settings.manager_role_id, "None: only Manage Server"),
         inline=True,
     )
     embed.add_field(
         name="Subscriber role",
-        value=role(settings.subscriber_role_id, "None: everyone can subscribe"),
+        value=role_mention(settings.subscriber_role_id, "None: everyone can subscribe"),
         inline=True,
     )
     embed.add_field(

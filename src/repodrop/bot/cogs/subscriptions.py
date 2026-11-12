@@ -18,13 +18,14 @@ from repodrop.bot.checks import (
     can_modify,
     is_manager,
     manager_only,
+    missing_permissions,
     settings_for,
     subscriber_only,
 )
 from repodrop.bot.errors import UserError, reply_with_error
 from repodrop.bot.settings_panel import SettingsPanel
 from repodrop.db import queries
-from repodrop.db.models import Kind, LatestAccess, Subscription
+from repodrop.db.models import Kind, LatestAccess
 from repodrop.db.queries import WatchKey
 from repodrop.github.client import GitHubError, NotFoundError, RateLimitedError
 from repodrop.github.names import parse_repo
@@ -33,6 +34,7 @@ from repodrop.guild_settings import EffectiveSettings, cap_violation, usage_line
 from repodrop.observability import audit
 from repodrop.poller.detectors import (
     RepoRef,
+    latest_release,
     previous_release_tag,
     release_payload,
     tag_payload,
@@ -52,7 +54,6 @@ from repodrop.subscription_plan import (
 if TYPE_CHECKING:
     from repodrop.bot.client import RepoDropBot
 
-REQUIRED_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True, embed_links=True)
 # What a member needs in a channel to point the bot at it (managers are exempt), so nobody can
 # use the bot to post somewhere they can't post themselves.
 MEMBER_PERMISSIONS = discord.Permissions(view_channel=True, send_messages=True)
@@ -156,7 +157,7 @@ class SubscriptionsCog(
                     f"{target.mention} is already subscribed to **{gh_repo.full_name}**. "
                     f"Only <@{existing.created_by}>, who added it, or a manager can change it."
                 )
-            old = _state(existing) if existing is not None else None
+            old = SubscriptionState.of(existing) if existing is not None else None
             try:
                 new = plan_subscription(old, opts, max_branches=max_branches)
             except PlanError as exc:
@@ -299,7 +300,7 @@ class SubscriptionsCog(
                         items = (await self.bot.github.list_releases(gh_repo.full_name)).items
                     except GitHubError:
                         items = []
-                latest = _latest_release(items or [])
+                latest = latest_release(items or [])
         return latest
 
     # ------------------------------------------------------------------ /repodrop unsubscribe
@@ -369,7 +370,7 @@ class SubscriptionsCog(
 
         lines = []
         for sub, repo in rows:
-            state = _state(sub)
+            state = SubscriptionState.of(sub)
             extras = []
             if state.include_prereleases and Kind.RELEASE in state.kinds:
                 extras.append("pre-releases")
@@ -408,7 +409,8 @@ class SubscriptionsCog(
             target = guild.get_channel(channel_id)
             if not isinstance(target, discord.TextChannel):
                 return ["The channel no longer exists"]
-            return [f"I'm missing {', '.join(m)}"] if (m := _missing(target)) else []
+            missing = missing_permissions(target, guild.me)
+            return [f"I'm missing {', '.join(missing)}"] if missing else []
 
         entries = status_report.build_entries(rows, watches, permission_problems)
         pages = status_report.paginate(entries)
@@ -473,7 +475,7 @@ class SubscriptionsCog(
         releases = await self._github_call(self.bot.github.list_releases(gh_repo.full_name))
         items = releases.items or []
         stable = [r for r in items if not r.prerelease]
-        if release := _latest_release(stable):
+        if release := latest_release(stable):
             kind = "release"
             payload = release_payload(
                 ref, release, previous_tag=previous_release_tag(release, items)
@@ -607,7 +609,7 @@ class SubscriptionsCog(
 
     @staticmethod
     def _check_bot_permissions(channel: discord.TextChannel) -> None:
-        if missing := _missing(channel):
+        if missing := missing_permissions(channel, channel.guild.me):
             raise UserError(f"I'm missing {', '.join(missing)} in {channel.mention}.")
 
     @staticmethod
@@ -623,30 +625,27 @@ class SubscriptionsCog(
         return _presentation_of(await settings_for(interaction))
 
     @staticmethod
-    async def _github_call[T](call: Awaitable[T]) -> T:
+    async def _github_call[T](call: Awaitable[T], *, not_found: str | None = None) -> T:
+        """Turn GitHub failures into messages for the member; `not_found` is the one for a 404."""
         try:
             return await call
         except RateLimitedError:
             raise UserError(
                 "GitHub is rate limiting me right now; try again in a few minutes."
             ) from None
-        except GitHubError:
+        except GitHubError as exc:
+            if not_found and isinstance(exc, NotFoundError):
+                raise UserError(not_found) from None
             raise UserError("GitHub didn't respond properly; try again in a moment.") from None
 
     async def _resolve_repo(self, value: str) -> Repository:
         full_name = parse_repo(value)
         if full_name is None:
             raise UserError("Give the repo as `owner/name` or a github.com URL.")
-        try:
-            repo = await self.bot.github.get_repo(full_name)
-        except NotFoundError:
-            raise UserError(f"**{full_name}** doesn't exist or isn't public.") from None
-        except RateLimitedError:
-            raise UserError(
-                "GitHub is rate limiting me right now; try again in a few minutes."
-            ) from None
-        except GitHubError:
-            raise UserError("GitHub didn't respond properly; try again in a moment.") from None
+        repo = await self._github_call(
+            self.bot.github.get_repo(full_name),
+            not_found=f"**{full_name}** doesn't exist or isn't public.",
+        )
         if repo.private:
             raise UserError(f"**{full_name}** is private; only public repos are supported.")
         return repo
@@ -664,26 +663,3 @@ def _presentation_of(settings: EffectiveSettings) -> Presentation:
 def _view_kw(view: discord.ui.View | None) -> dict[str, discord.ui.View]:
     """`view=None` isn't accepted everywhere, so only pass it when there is one."""
     return {"view": view} if view is not None else {}
-
-
-def _missing(channel: discord.TextChannel) -> list[str]:
-    """The bot's missing required permissions in a channel, as display names."""
-    have = channel.permissions_for(channel.guild.me)
-    return [
-        name.replace("_", " ").title()
-        for name, needed in REQUIRED_PERMISSIONS
-        if needed and not getattr(have, name)
-    ]
-
-
-def _state(sub: Subscription) -> SubscriptionState:
-    return SubscriptionState(
-        kinds=frozenset(sub.kinds),
-        branches=tuple(sub.branches),
-        include_prereleases=sub.include_prereleases,
-    )
-
-
-def _latest_release(releases: list[Release]) -> Release | None:
-    published = [r for r in releases if not r.draft and r.published_at is not None]
-    return max(published, key=lambda r: r.published_at, default=None)  # type: ignore[arg-type, return-value]

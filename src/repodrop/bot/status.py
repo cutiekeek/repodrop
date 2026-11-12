@@ -46,11 +46,7 @@ def build_entries(
     entries = []
     for row in rows:
         sub, repo = row.subscription, row.repo
-        state = SubscriptionState(
-            kinds=frozenset(sub.kinds),
-            branches=tuple(sub.branches),
-            include_prereleases=sub.include_prereleases,
-        )
+        state = SubscriptionState.of(sub)
         needed = needed_watches(repo.id, state, repo.default_branch)
         watches = [
             w
