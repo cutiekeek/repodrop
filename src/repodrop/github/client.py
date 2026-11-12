@@ -50,6 +50,12 @@ class RateLimit:
     def is_low(self, floor: int) -> bool:
         return self.remaining is not None and self.remaining < floor
 
+    def is_used_up(self) -> bool:
+        """Nothing left until the reset: GitHub refuses every request, so don't send any."""
+        return (
+            self.remaining == 0 and self.reset_at is not None and self.reset_at > datetime.now(UTC)
+        )
+
 
 @dataclass(slots=True)
 class Conditional[T]:

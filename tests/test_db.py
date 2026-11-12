@@ -392,6 +392,31 @@ async def test_poller_fetches_the_big_page_only_when_a_whole_page_is_new(session
     assert gh.page_sizes == [10, 100, 10]
 
 
+async def test_poller_waits_for_the_reset_when_the_rate_limit_is_used_up(sessions):
+    gh = FakeGitHub()
+    reset = datetime.now(UTC) + timedelta(minutes=20)
+    gh.rate_limit = RateLimit(remaining=0, reset_at=reset)
+    poller = Poller(settings(), sessions, gh, asyncio.Event())
+    async with sessions.begin() as s:
+        repo, _ = await make_sub(s)
+    key = WatchKey(repo.id, "release", "")
+    await due_watch(sessions, key)
+
+    # GitHub would refuse the request (and may ban clients that keep asking): don't send it.
+    await poller.run_cycle()
+    assert gh.page_sizes == []
+    assert await poller.refresh_metadata() == 0
+    async with sessions() as s:
+        watch = await queries.get_watch(s, key)
+        assert watch.next_poll_at > reset and "rate limited" in watch.last_error
+
+    # Once the reset time has passed, polling resumes.
+    gh.rate_limit.reset_at = datetime.now(UTC) - timedelta(seconds=1)
+    await due_watch(sessions, key)
+    await poller.run_cycle()
+    assert gh.page_sizes == [10]
+
+
 async def test_maintenance_pass_cleans_up_everything_that_is_due(sessions):
     poller = Poller(settings(), sessions, FakeGitHub(), asyncio.Event())
     long_ago = datetime.now(UTC) - timedelta(days=120)

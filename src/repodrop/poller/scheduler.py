@@ -152,6 +152,14 @@ class Poller:
         with logfire.span(
             "poll_repo {repo} {kind}", repo=repo.full_name, kind=key.kind, branch=key.branch
         ) as span:
+            if self._github.rate_limit.is_used_up():
+                # GitHub would refuse the request, and may ban clients that keep asking.
+                # `_at` schedules past the reset while the limit is this low.
+                span.set_attribute("result", "rate_limited")
+                await self._reschedule(
+                    key, self._at(watch.poll_interval), error="rate limited by GitHub"
+                )
+                return 0
             try:
                 result = await self._fetch(key, repo.full_name, watch.etag)
                 if (
@@ -361,6 +369,8 @@ class Poller:
 
     async def refresh_metadata(self) -> int:
         """Re-check repos not checked in the last day (renames, default-branch changes)."""
+        if self._github.rate_limit.is_used_up():
+            return 0  # every request would be refused; the next pass catches up
         async with self._sessions() as session:
             repos = await queries.repos_due_for_metadata(
                 session,

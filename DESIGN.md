@@ -400,7 +400,7 @@ Members can remove subscriptions they created (matched on `created_by`), and man
 ### GitHub rate limits
 
 - Authenticate with a token for 5,000 requests per hour. Unauthenticated access is limited to 60 per hour and is not viable.
-- Track the `X-RateLimit-Remaining` and `X-RateLimit-Reset` headers. When remaining drops below a threshold, stretch poll intervals until the reset.
+- Track the `X-RateLimit-Remaining` and `X-RateLimit-Reset` headers. When remaining drops below a threshold, stretch poll intervals until the reset. When nothing is left, polls and the metadata refresh wait for the reset without calling GitHub at all: it would refuse the requests, and it may ban clients that keep sending them.
 - Respect `Retry-After` on secondary rate limits, and keep request concurrency modest.
 
 ### Discord
