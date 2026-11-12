@@ -10,6 +10,7 @@ import logfire
 from discord import app_commands
 from discord.ext import commands
 
+from repodrop.announcer.dispatcher import chunk_lines
 from repodrop.announcer.embeds import Presentation, build_message
 from repodrop.bot import status as status_report
 from repodrop.bot.checks import (
@@ -380,9 +381,18 @@ class SubscriptionsCog(
             suffix = f" · {' · '.join(extras)}" if extras else ""
             link = f"[{repo.full_name}](<https://github.com/{repo.full_name}>)"
             lines.append(f"<#{sub.channel_id}> · {link} · {describe_state(state)}{suffix}")
-        embed = discord.Embed(title="GitHub subscriptions", description="\n".join(lines)[:4096])
-        embed.set_footer(text=usage_line(usage, settings))
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        title = "GitHub subscriptions"
+        pages = chunk_lines(lines, status_report.PAGE_CHARS)
+        if len(pages) == 1:
+            embed = discord.Embed(title=title, description=pages[0])
+            embed.set_footer(text=usage_line(usage, settings))
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+        # Too many for one message: the same Previous/Next pages as /repodrop status.
+        view = status_report.StatusView(
+            title, usage_line(usage, settings), pages, interaction.user.id
+        )
+        await interaction.response.send_message(embed=view.embed(), view=view, ephemeral=True)
 
     # ------------------------------------------------------------------ /repodrop status
 

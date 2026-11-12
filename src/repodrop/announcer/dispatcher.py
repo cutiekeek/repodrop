@@ -261,7 +261,7 @@ class Dispatcher:
             "resume. `/repodrop status` has details."
         )
         try:
-            for message in _chunk([header, *lines, footer], MESSAGE_LIMIT):
+            for message in chunk_lines([header, *lines, footer], MESSAGE_LIMIT):
                 await channel.send(message, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException as exc:
             logfire.warn(
@@ -273,7 +273,7 @@ class Dispatcher:
         return True
 
 
-def _chunk(lines: list[str], limit: int) -> list[str]:
+def chunk_lines(lines: list[str], limit: int) -> list[str]:
     """Join lines into messages of at most `limit` characters."""
     messages: list[str] = []
     current = ""

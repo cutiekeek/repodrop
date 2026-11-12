@@ -637,6 +637,21 @@ async def test_subscribe_creates_updates_and_enforces_creator_and_caps(sessions)
         assert [r.full_name for r in await s.scalars(select(Repo))] == ["octo/widget"]
 
 
+async def test_list_shows_every_subscription_across_pages(sessions):
+    channels = range(1, 81)  # more lines than fit in one message
+    async with sessions.begin() as s:
+        for channel_id in channels:
+            await make_sub(s, channel=channel_id)
+    cog = command_cog(sessions, settings())
+    interaction = interaction_in(cog, member_of(1))
+    await cog.list_.callback(cog, interaction)
+
+    view = interaction.response.send_message.await_args.kwargs["view"]
+    assert len(view.pages) > 1
+    listed = "\n".join(view.pages).splitlines()
+    assert [line.split(" · ")[0] for line in listed] == [f"<#{c}>" for c in channels]
+
+
 async def test_unsubscribe_needs_the_creator_or_a_manager(sessions):
     async with sessions.begin() as s:
         repo, _ = await make_sub(s)  # created by USER
