@@ -196,6 +196,15 @@ class SubscriptionsCog(
                 await queries.ensure_watch(
                     session, key, initial_interval=self.bot.settings.poll_default_interval
                 )
+            # upsert_repo just stored GitHub's current default branch. If it changed, other
+            # subscriptions following the default need a watch on the new one now: the daily
+            # metadata check compares against the stored value and won't see a change anymore.
+            await queries.ensure_default_branch_watch(
+                session,
+                db_repo.id,
+                gh_repo.default_branch,
+                initial_interval=self.bot.settings.poll_default_interval,
+            )
             if old is not None:
                 removed = removed_by_update(old, new, gh_repo.default_branch)
                 if removed:

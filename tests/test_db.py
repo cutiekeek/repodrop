@@ -3,11 +3,13 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 from sqlalchemy import select, text, update
 
 from repodrop.announcer.dispatcher import Dispatcher
+from repodrop.bot.cogs.subscriptions import SubscriptionsCog
 from repodrop.config import Settings
 from repodrop.db import queries
 from repodrop.db.models import Delivery, Event, Repo, RepoWatch, Subscription
@@ -483,6 +485,52 @@ async def test_metadata_refresh_follows_default_branch_change(sessions):
         assert branches == {"main", "trunk"}
         trunk = await queries.get_watch(s, WatchKey(repo.id, "commit", "trunk"))
         assert trunk.last_seen_id is None  # baselined on its first poll, so no history flood
+
+
+async def test_subscribe_moves_default_followers_when_default_branch_changed(sessions):
+    # One server follows the default branch (main) for commits.
+    async with sessions.begin() as s:
+        repo, _ = await make_sub(s, kinds=("commit",))
+        await queries.ensure_watch(s, WatchKey(repo.id, "commit", "main"), initial_interval=TEN_MIN)
+
+    # The default branch becomes trunk. Before the daily metadata check sees it, another
+    # server subscribes to the repo, which stores the new default branch.
+    from repodrop.guild_settings import GuildSettingsCache
+
+    config = settings()
+    bot = SimpleNamespace(
+        settings=config,
+        sessions=sessions,
+        github=SimpleNamespace(get_repo=AsyncMock(return_value=gh_repo(default_branch="trunk"))),
+        guild_settings=GuildSettingsCache(config, sessions),
+        poller=SimpleNamespace(baseline=AsyncMock(return_value=[])),
+    )
+    member = MagicMock(spec=discord.Member)
+    member.id, member.roles = 999, []
+    member.guild_permissions = discord.Permissions(manage_guild=True)
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id = 555
+    channel.permissions_for.return_value = discord.Permissions.all()
+    interaction = SimpleNamespace(
+        guild=SimpleNamespace(id=GUILD + 1),
+        guild_id=GUILD + 1,
+        user=member,
+        channel=channel,
+        client=bot,
+        response=SimpleNamespace(defer=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+    cog = SubscriptionsCog(bot)
+    await cog.subscribe.callback(cog, interaction, "octo/widget")
+    interaction.followup.send.assert_awaited_once()
+
+    async with sessions.begin() as s:
+        await queries.prune_orphans(s)  # the hourly cleanup
+        commit_branches = set(
+            await s.scalars(select(RepoWatch.branch).where(RepoWatch.kind == "commit"))
+        )
+    # The first server's subscription now has a watch on trunk; main is no longer needed.
+    assert commit_branches == {"trunk"}
 
 
 async def test_metadata_refresh_disables_missing_repo(sessions):
