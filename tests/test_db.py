@@ -656,13 +656,20 @@ def command_cog(sessions, config: Settings, *repos: Repository) -> Subscriptions
     return SubscriptionsCog(bot)
 
 
-def interaction_in(cog: SubscriptionsCog, member, *, channel_id=CHANNEL, guild_id=GUILD):
-    """A command run by `member` in a channel where everyone, the bot included, may post."""
+def interaction_in(cog: SubscriptionsCog, member, *, channel_id=CHANNEL, guild_id=GUILD, hidden=()):
+    """A command run by `member` in a channel where everyone, the bot included, may post.
+
+    `hidden` lists the IDs of other channels in the server that nobody may view.
+    """
     channel = MagicMock(spec=discord.TextChannel)
     channel.id, channel.mention = channel_id, f"<#{channel_id}>"
     channel.permissions_for.return_value = discord.Permissions.all()
+    no_access = MagicMock(spec=discord.TextChannel)
+    no_access.permissions_for.return_value = discord.Permissions.none()
     return SimpleNamespace(
-        guild=SimpleNamespace(id=guild_id),
+        guild=SimpleNamespace(
+            id=guild_id, get_channel=lambda cid: no_access if cid in hidden else None
+        ),
         guild_id=guild_id,
         user=member,
         channel=channel,
@@ -712,6 +719,25 @@ async def test_list_shows_every_subscription_across_pages(sessions):
     assert len(view.pages) > 1
     listed = "\n".join(view.pages).splitlines()
     assert [line.split(" · ")[0] for line in listed] == [f"<#{c}>" for c in channels]
+
+
+async def test_list_hides_channels_the_member_cannot_view(sessions):
+    async with sessions.begin() as s:
+        await make_sub(s, channel=1)
+        await make_sub(s, channel=2)  # a staff-only channel
+    cog = command_cog(sessions, settings())
+
+    async def listed(member, **where) -> str:
+        interaction = interaction_in(cog, member, hidden={2})
+        await cog.list_.callback(cog, interaction, **where)
+        sent = interaction.response.send_message.await_args
+        return sent.kwargs["embed"].description if "embed" in sent.kwargs else sent.args[0]
+
+    member, staff_channel = member_of(1), SimpleNamespace(id=2, mention="<#2>")
+    assert "<#1>" in await listed(member) and "<#2>" not in await listed(member)
+    assert "no subscriptions that you can see" in await listed(member, channel=staff_channel)
+    # Managers see everything.
+    assert "<#2>" in await listed(member_of(9, manager=True))
 
 
 async def test_unsubscribe_needs_the_creator_or_a_manager(sessions):

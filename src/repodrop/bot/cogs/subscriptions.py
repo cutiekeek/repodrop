@@ -362,10 +362,22 @@ class SubscriptionsCog(
                 session, interaction.guild.id, channel.id if channel else None
             )
             usage = await queries.guild_usage(session, interaction.guild.id)
+        total = len(rows)
+        if not is_manager(interaction.user, settings):  # type: ignore[arg-type]
+            # Don't tell members what channels they can't view are subscribed to.
+            guild, member = interaction.guild, interaction.user
+            rows = [
+                (sub, repo)
+                for sub, repo in rows
+                if (target := guild.get_channel(sub.channel_id)) is None
+                or target.permissions_for(member).view_channel  # type: ignore[arg-type]
+            ]
         if not rows:
             where = channel.mention if channel else "This server"
+            which = " that you can see" if total else ""
             await interaction.response.send_message(
-                f"{where} has no subscriptions. Add one with `/repodrop subscribe`.", ephemeral=True
+                f"{where} has no subscriptions{which}. Add one with `/repodrop subscribe`.",
+                ephemeral=True,
             )
             return
 

@@ -52,7 +52,7 @@ All under `/repodrop`, with replies only you can see. Everyone can see the comma
 |---|---|
 | `/repodrop subscribe repo [channel] [releases] [tags] [commits] [branches] [prereleases]` | Start announcing a repo (releases by default). Running it again for the same repo and channel updates it, changing only the options you pass: `commits:true` adds commits, `tags:false` removes tags, `branches:main,dev` sets the commit branches, `branches:default` follows the default branch. You need to be able to post in the target channel yourself (managers excepted). |
 | `/repodrop unsubscribe repo [channel]` | Stop announcing a repo in a channel. Your own subscriptions, or any as a manager. |
-| `/repodrop list [channel]` | Show this server's subscriptions. |
+| `/repodrop list [channel]` | Show this server's subscriptions. Members see only those in channels they can view; managers see all. |
 | `/repodrop status [channel]` | Health report: what each subscription posts, when it last posted and was checked, and any problems (missing permissions, deleted branches, disabled subscriptions). Managers only. |
 | `/repodrop latest repo [public]` | Show a repo's newest release (or newest tag) with its buttons, no subscription needed. Only you see it unless you pass `public:true`, which needs you to be able to post in the channel yourself (managers excepted). Servers can limit it to managers or turn off public posts. |
 | `/repodrop settings` | Settings panel: manager role, subscriber role, default channel, embed style, and who can use `/repodrop latest`. Changes save immediately. Managers only; changing the manager role needs Manage Server. |
