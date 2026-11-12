@@ -30,6 +30,12 @@ from repodrop.poller.detectors import Detection, RepoRef
 CLAIM_LEASE = timedelta(minutes=5)
 METADATA_BATCH = 100
 REPO_GONE = "the repo was deleted or made private"
+# GitHub can wrongly answer 404 for a healthy repo for a while, and disabling is drastic (every
+# server has to subscribe again), so a missing repo must still be missing this much later.
+REPO_NOT_FOUND = "GitHub can't find the repo; checking again before disabling"
+GONE_CONFIRM_DELAY = timedelta(hours=1)
+# Events and their deliveries are only history once announced; without this they grow forever.
+EVENT_RETENTION = timedelta(days=90)
 
 
 def next_interval(
@@ -86,6 +92,7 @@ class Poller:
                             session, grace=self._settings.guild_removal_grace
                         )
                         watches, repos = await queries.prune_orphans(session)
+                        events = await queries.prune_old_events(session, older_than=EVENT_RETENTION)
                     for guild_id in purged:
                         audit(
                             "deleted data for guild {guild_id}: the grace period after removal "
@@ -93,9 +100,11 @@ class Poller:
                             guild_id=guild_id,
                         )
                     logfire.info(
-                        "pruned {watches} orphan watches and {repos} orphan repos",
+                        "pruned {watches} orphan watches, {repos} orphan repos and {events} old "
+                        "events",
                         watches=watches,
                         repos=repos,
+                        events=events,
                     )
             except Exception:
                 logfire.exception("maintenance failed")
@@ -275,14 +284,18 @@ class Poller:
 
         The commits endpoint answers 404 for a missing branch too, and disabling every
         subscription to a repo is drastic, so confirm with a lookup by numeric ID first (it
-        survives renames and transfers).
+        survives renames and transfers). If that says the repo is missing too, it has to say
+        so again `GONE_CONFIRM_DELAY` later before anything is disabled.
         """
         key = watch.key
         retry_at = self._at(watch.poll_interval)
         try:
             fresh = await self._github.get_repo_by_id(repo.github_id)
         except NotFoundError:
-            await self._repo_gone(repo)
+            if watch.last_error == REPO_NOT_FOUND:
+                await self._repo_gone(repo)
+            else:
+                await self._reschedule(key, self._at(GONE_CONFIRM_DELAY), error=REPO_NOT_FOUND)
             return
         except GitHubError as exc:
             await self._reschedule(key, retry_at, error=f"404, then couldn't confirm: {exc}")
@@ -347,7 +360,8 @@ class Poller:
         try:
             result = await self._github.repo_metadata(repo.github_id, etag=repo.metadata_etag)
         except NotFoundError:
-            await self._repo_gone(repo)
+            # Not disabled here: the poller hits the same 404 and confirms it before disabling
+            # (see _handle_not_found). Recorded as checked so it isn't retried every hour.
             async with self._sessions.begin() as session:
                 await queries.record_repo_metadata(session, repo.id, etag=None)
             return

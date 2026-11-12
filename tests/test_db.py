@@ -389,6 +389,20 @@ async def test_poller_disables_subscriptions_when_repo_is_gone(sessions):
     await due_watch(sessions, WatchKey(repo.id, "release", ""))
     await due_watch(sessions, WatchKey(repo.id, "commit", "main"))
 
+    # One 404 isn't enough (GitHub can wrongly answer 404 for a while): nothing is disabled,
+    # and the check is repeated about an hour later.
+    await poller.run_cycle()
+    assert not wake.is_set()
+    async with sessions() as s:
+        assert (await s.get(Subscription, sub.id)).active
+        for watch in (await s.scalars(select(RepoWatch))).all():
+            assert not is_stopped(watch)
+            assert "checking again" in watch.last_error
+            assert watch.next_poll_at > datetime.now(UTC) + timedelta(minutes=50)
+
+    # Still missing at the next check: now it's treated as gone.
+    await due_watch(sessions, WatchKey(repo.id, "release", ""))
+    await due_watch(sessions, WatchKey(repo.id, "commit", "main"))
     await poller.run_cycle()
     assert wake.is_set()
     async with sessions() as s:
@@ -533,15 +547,37 @@ async def test_subscribe_moves_default_followers_when_default_branch_changed(ses
     assert commit_branches == {"trunk"}
 
 
-async def test_metadata_refresh_disables_missing_repo(sessions):
+async def test_metadata_refresh_leaves_missing_repo_to_the_poller(sessions):
     gh = FakeGitHub()
     gh.repo = None
     poller = Poller(settings(), sessions, gh, asyncio.Event())
     async with sessions.begin() as s:
-        _, sub = await make_sub(s)
+        repo, sub = await make_sub(s)
     await poller.refresh_metadata()
     async with sessions() as s:
-        assert not (await s.get(Subscription, sub.id)).active
+        # One 404 here disables nothing; the poller confirms a missing repo before disabling.
+        assert (await s.get(Subscription, sub.id)).active
+        assert (await s.get(Repo, repo.id)).metadata_checked_at is not None  # not retried hourly
+
+
+async def test_old_events_are_deleted_with_their_deliveries(sessions):
+    async with sessions.begin() as s:
+        repo, _ = await make_sub(s)
+        key = WatchKey(repo.id, "release", "")
+        for external_id in ("old", "new"):
+            event_id = await queries.insert_event(
+                s, repo_id=repo.id, kind="release", external_id=external_id, payload={}
+            )
+            await queries.fan_out_event(s, event_id=event_id, key=key, default_branch="main")
+        await s.execute(
+            update(Event)
+            .where(Event.external_id == "old")
+            .values(detected_at=datetime.now(UTC) - timedelta(days=91))
+        )
+        assert await queries.prune_old_events(s, older_than=timedelta(days=90)) == 1
+    async with sessions() as s:
+        assert list(await s.scalars(select(Event.external_id))) == ["new"]
+        assert len((await s.scalars(select(Delivery))).all()) == 1
 
 
 # --------------------------------------------------------------------------- announcer

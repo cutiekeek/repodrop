@@ -89,7 +89,7 @@ def render_entry(e: HealthEntry) -> str:
     if not e.active:
         since = f" ({_ts(e.disabled_at)})" if e.disabled_at else ""
         lines.append(f"Disabled: {e.disabled_reason or 'paused'}{since}")
-    posted = f"last posted {_ts(e.last_sent_at)}" if e.last_sent_at else "nothing posted yet"
+    posted = f"last posted {_ts(e.last_sent_at)}" if e.last_sent_at else "nothing posted recently"
     polled = f"checked {_ts(e.last_polled_at)}" if e.last_polled_at else "not checked yet"
     lines.append(f"{posted} · {polled}")
     lines.extend(f"⚠️ {p}" for p in e.problems)

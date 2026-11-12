@@ -372,6 +372,7 @@ class ClaimedWatch:
     etag: str | None
     last_seen_id: str | None
     poll_interval: timedelta
+    last_error: str | None = None  # from the previous poll
 
 
 async def ensure_watch(
@@ -437,6 +438,7 @@ async def claim_due_watches(
             RepoWatch.etag,
             RepoWatch.last_seen_id,
             RepoWatch.poll_interval,
+            RepoWatch.last_error,
         )
     )
     rows = (await session.execute(stmt)).all()
@@ -446,6 +448,7 @@ async def claim_due_watches(
             etag=r.etag,
             last_seen_id=r.last_seen_id,
             poll_interval=r.poll_interval,
+            last_error=r.last_error,
         )
         for r in rows
     ]
@@ -573,6 +576,12 @@ async def insert_event(
         .returning(Event.id)
     )
     return await session.scalar(stmt)
+
+
+async def prune_old_events(session: AsyncSession, *, older_than: timedelta) -> int:
+    """Delete events detected more than `older_than` ago; their deliveries cascade."""
+    result = await session.execute(delete(Event).where(Event.detected_at < func.now() - older_than))
+    return result.rowcount  # type: ignore[attr-defined]
 
 
 async def fan_out_event(
