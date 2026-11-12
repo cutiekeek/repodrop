@@ -61,8 +61,16 @@ class Conditional[T]:
 
 
 class GitHubClient:
-    def __init__(self, token: str, *, base_url: str = API_URL, timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        base_url: str = API_URL,
+        timeout: float = 20.0,
+        transport: httpx.AsyncBaseTransport | None = None,  # tests pass a fake one
+    ) -> None:
         self._http = httpx.AsyncClient(
+            transport=transport,
             base_url=base_url,
             headers={
                 "Authorization": f"Bearer {token}",
