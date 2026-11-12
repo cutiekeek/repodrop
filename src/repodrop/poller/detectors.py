@@ -17,6 +17,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import quote
 
 from repodrop.github.client import TAGS_PER_PAGE
 from repodrop.github.schemas import Commit, Release, Tag
@@ -217,7 +218,7 @@ def tag_payload(repo: RepoRef, tag: Tag, *, previous_tag: str | None = None) -> 
         "repo": repo.payload(),
         "name": tag.name,
         "sha": tag.commit.sha,
-        "html_url": f"{repo.html_url}/tree/{tag.name}",
+        "html_url": f"{repo.html_url}/tree/{quote(tag.name, safe='/')}",
         "previous_tag": previous_tag,
     }
 
@@ -245,7 +246,7 @@ def detect_commits(repo: RepoRef, branch: str, commits: list[Commit], last_seen:
     compare_url = (
         f"{repo.html_url}/compare/{last_seen[:12]}...{head[:12]}"
         if last_seen
-        else f"{repo.html_url}/commits/{branch}"
+        else f"{repo.html_url}/commits/{quote(branch, safe='/')}"
     )
     payload = {
         "repo": repo.payload(),

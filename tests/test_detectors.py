@@ -12,6 +12,7 @@ from repodrop.poller.detectors import (
     detect_promotions,
     detect_releases,
     detect_tags,
+    tag_payload,
 )
 
 REPO = RepoRef("octo/widget")
@@ -195,6 +196,17 @@ def test_detect_commits_force_push_marks_truncated():
     d = detect_commits(REPO, "main", [commit("y"), commit("x")], "gone")
     assert d.events[0].payload["truncated"] is True
     assert len(d.events[0].payload["commits"]) == 2
+
+
+def test_tag_and_branch_links_are_url_encoded():
+    # A raw "#" would cut the URL short and open the wrong page.
+    assert tag_payload(REPO, tag("build#12"))["html_url"] == (
+        "https://github.com/octo/widget/tree/build%2312"
+    )
+    first_push = detect_commits(REPO, "fix/#7", [commit("a")], "")
+    assert first_push.events[0].payload["compare_url"] == (
+        "https://github.com/octo/widget/commits/fix/%237"
+    )
 
 
 def test_detect_commits_unchanged():
