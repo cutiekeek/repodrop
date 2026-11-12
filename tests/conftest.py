@@ -15,8 +15,8 @@ def _database_url() -> str:
 
 
 @pytest.fixture
-async def sessions():
-    """A session factory bound to a throwaway schema, dropped after the test.
+async def engine():
+    """An engine bound to an empty throwaway schema, dropped after the test.
 
     Skips when Postgres isn't reachable.
     """
@@ -32,11 +32,17 @@ async def sessions():
 
     engine = create_async_engine(url, connect_args={"server_settings": {"search_path": schema}})
     try:
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        yield create_session_factory(engine)
+        yield engine
     finally:
         await engine.dispose()
         async with admin.begin() as conn:
             await conn.execute(text(f'DROP SCHEMA "{schema}" CASCADE'))
         await admin.dispose()
+
+
+@pytest.fixture
+async def sessions(engine):
+    """A session factory on a throwaway schema with the tables the models describe."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    return create_session_factory(engine)
