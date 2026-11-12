@@ -185,14 +185,20 @@ class Poller:
             else:
                 detection = _detect(key, RepoRef(repo.full_name), result.items, watch.last_seen_id)
 
-            interval = next_interval(
-                watch.poll_interval,
-                changed=bool(detection.events),
-                min_interval=self._settings.poll_min_interval,
-                max_interval=self._settings.poll_max_interval,
-            )
             new_deliveries = 0
             async with self._sessions.begin() as session:
+                if key.kind == Kind.RELEASE and result.items and watch.last_seen_id is not None:
+                    detection.events += detectors.detect_promotions(
+                        RepoRef(repo.full_name),
+                        result.items,
+                        await queries.prerelease_event_ids(session, key.repo_id),
+                    )
+                interval = next_interval(
+                    watch.poll_interval,
+                    changed=bool(detection.events),
+                    min_interval=self._settings.poll_min_interval,
+                    max_interval=self._settings.poll_max_interval,
+                )
                 for event in detection.events:
                     event_id = await queries.insert_event(
                         session,
@@ -209,6 +215,7 @@ class Poller:
                         key=key,
                         default_branch=repo.default_branch,
                         prerelease=event.prerelease,
+                        promoted=event.promoted,
                     )
                 await queries.update_watch(
                     session,

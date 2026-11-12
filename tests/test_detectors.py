@@ -9,6 +9,7 @@ from repodrop.poller.detectors import (
     baseline_releases,
     baseline_tags,
     detect_commits,
+    detect_promotions,
     detect_releases,
     detect_tags,
 )
@@ -89,6 +90,15 @@ def test_detect_releases_flags_prereleases():
     d = detect_releases(REPO, [release(2, 20, prerelease=True)], "")
     assert d.events[0].prerelease is True
     assert d.events[0].payload["prerelease"] is True
+
+
+def test_detect_promotions_are_stable_releases_announced_as_prereleases():
+    releases = [release(3, 30, prerelease=True), release(2, 20), release(1, 10)]
+    # 2 and 3 were announced as pre-releases; 2 has since been marked stable.
+    events = detect_promotions(REPO, releases, {"2", "3"})
+    assert [e.external_id for e in events] == ["2:stable"]
+    assert events[0].promoted and events[0].payload["prerelease"] is False
+    assert events[0].payload["previous_tag"] == "v1"
 
 
 def test_detect_releases_from_empty_baseline():

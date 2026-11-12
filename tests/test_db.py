@@ -359,6 +359,39 @@ async def test_poller_baseline_detect_and_not_modified(sessions):
         assert watch.poll_interval == timedelta(minutes=1)  # changed: back to the minimum
 
 
+async def test_prerelease_marked_stable_later_reaches_subscriptions_without_prereleases(sessions):
+    t0 = datetime(2026, 1, 1, tzinfo=UTC)
+    gh = FakeGitHub()
+    poller = Poller(settings(), sessions, gh, asyncio.Event())
+    async with sessions.begin() as s:
+        repo, stable_only = await make_sub(s, channel=1)
+        _, with_pre = await make_sub(s, channel=2, prereleases=True)
+    key = WatchKey(repo.id, "release", "")
+    await due_watch(sessions, key, last_seen=t0.isoformat())
+
+    async def poll(etag: str, *, prerelease: bool) -> set[tuple[int, str]]:
+        gh.releases = [gh_release(2, t0 + timedelta(hours=1), prerelease=prerelease)]
+        gh.etag = etag
+        async with sessions.begin() as s:
+            await make_due(s, key)
+        await poller.run_cycle()
+        async with sessions() as s:
+            rows = await s.execute(
+                select(Delivery.subscription_id, Event.external_id).join(
+                    Event, Event.id == Delivery.event_id
+                )
+            )
+            return {(r[0], r[1]) for r in rows}
+
+    # Published as a pre-release: only the subscription that wants pre-releases gets it.
+    assert await poll('"a"', prerelease=True) == {(with_pre.id, "2")}
+    # The same release is marked stable: the other subscription hears about it now.
+    promoted = {(with_pre.id, "2"), (stable_only.id, "2:stable")}
+    assert await poll('"b"', prerelease=False) == promoted
+    # Later polls don't announce it again.
+    assert await poll('"c"', prerelease=False) == promoted
+
+
 async def due_watch(sessions, key: WatchKey, last_seen="x") -> None:
     async with sessions.begin() as s:
         await queries.ensure_watch(s, key, initial_interval=TEN_MIN)

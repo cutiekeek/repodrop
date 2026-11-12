@@ -50,6 +50,7 @@ class DetectedEvent:
     external_id: str
     payload: dict[str, Any]
     prerelease: bool = False
+    promoted: bool = False  # a pre-release that was later marked stable
 
 
 @dataclass(slots=True)
@@ -96,6 +97,26 @@ def detect_releases(repo: RepoRef, releases: list[Release], last_seen: str) -> D
             for r in new
         ],
     )
+
+
+def detect_promotions(
+    repo: RepoRef, releases: list[Release], announced_as_prerelease: set[str]
+) -> list[DetectedEvent]:
+    """Stable releases that were announced as pre-releases (the flag was removed later).
+
+    A promoted release keeps its ID, so `detect_releases` never reports it again and
+    subscriptions without pre-releases would never hear about it. It gets a second event,
+    `<id>:stable`, which is recorded once like any other.
+    """
+    return [
+        DetectedEvent(
+            external_id=f"{r.id}:stable",
+            payload=release_payload(repo, r, previous_tag=previous_release_tag(r, releases)),
+            promoted=True,
+        )
+        for r in _published(releases)
+        if not r.prerelease and str(r.id) in announced_as_prerelease
+    ]
 
 
 def previous_release_tag(release: Release, releases: list[Release]) -> str | None:

@@ -578,6 +578,16 @@ async def insert_event(
     return await session.scalar(stmt)
 
 
+async def prerelease_event_ids(session: AsyncSession, repo_id: int) -> set[str]:
+    """External IDs of the repo's release events that were announced as pre-releases."""
+    stmt = select(Event.external_id).where(
+        Event.repo_id == repo_id,
+        Event.kind == Kind.RELEASE,
+        Event.payload["prerelease"].astext == "true",
+    )
+    return set(await session.scalars(stmt))
+
+
 async def prune_old_events(session: AsyncSession, *, older_than: timedelta) -> int:
     """Delete events detected more than `older_than` ago; their deliveries cascade."""
     result = await session.execute(delete(Event).where(Event.detected_at < func.now() - older_than))
@@ -591,8 +601,12 @@ async def fan_out_event(
     key: WatchKey,
     default_branch: str,
     prerelease: bool = False,
+    promoted: bool = False,
 ) -> int:
     """Create a pending delivery for every active subscription that wants this event.
+
+    A `promoted` release (a pre-release later marked stable) only goes to subscriptions
+    without pre-releases; the others already got it when it was first published.
 
     Subscriptions in blocked servers, and commit events in servers with commits disallowed, are
     skipped but kept, so lifting the restriction resumes delivery. A server with no settings row
@@ -619,6 +633,8 @@ async def fan_out_event(
         matching = matching.where(branch_match, func.coalesce(GuildSettings.commits_allowed, True))
     if prerelease:
         matching = matching.where(Subscription.include_prereleases)
+    if promoted:
+        matching = matching.where(~Subscription.include_prereleases)
 
     stmt = (
         insert(Delivery)

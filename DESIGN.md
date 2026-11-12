@@ -245,6 +245,7 @@ When a guild removes the bot, nothing is deleted right away: its `guild_settings
 **Endpoints by kind:**
 
 - Releases use `GET /repos/{o}/{r}/releases?per_page=100`, skipping drafts and skipping prereleases unless the subscription opts in. Each new release's payload records the tag of the next-older release in the same response as `previous_tag`, for the Compare button (§8.4).
+- A pre-release that is later marked stable keeps its ID, so it would never be reported again. When a stable release on the page was announced as a pre-release, the poller records a second event, `{id}:stable`, and delivers it only to subscriptions without pre-releases (the others already got it).
 - Tags use `GET /repos/{o}/{r}/tags?per_page=100`. GitHub lists tags by version name, not by date, so the watermark is the set of names on that page and a tag is new when its name isn't in the set. Each new tag's payload records the next tag in the same response as `previous_tag`, for the Compare button.
 - Commits use `GET /repos/{o}/{r}/commits?sha={branch}&per_page=20`, polled separately for each watched branch. All new commits on one branch from one poll become a single batched event whose payload includes the branch name, with `external_id` set to `{branch}:{before_sha}..{after_sha}`.
 
