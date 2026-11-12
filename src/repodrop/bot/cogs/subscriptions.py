@@ -234,7 +234,11 @@ class SubscriptionsCog(
             reactivated=reactivated,
             changes=[] if old is None else describe_changes(old, new),
         )
-        latest_release = await self._baseline(keys, gh_repo)
+        # Preview the latest release whenever releases start being announced here.
+        preview = Kind.RELEASE in new.kinds and (
+            old is None or reactivated or Kind.RELEASE not in old.kinds
+        )
+        newest = await self._baseline(keys, gh_repo, preview=preview)
 
         repo_link = f"**[{gh_repo.full_name}](<{gh_repo.html_url}>)**"
         if created:
@@ -253,14 +257,11 @@ class SubscriptionsCog(
                 ]
             else:
                 lines = [f"Updated {repo_link} in {target.mention}: {' · '.join(changes)}."]
-        # Preview the latest release whenever releases start being announced here.
-        if Kind.RELEASE in new.kinds and (
-            old is None or reactivated or Kind.RELEASE not in old.kinds
-        ):
-            if latest_release:
+        if preview:
+            if newest:
                 lines.append(
-                    f"Latest release: [{latest_release.name or latest_release.tag_name}]"
-                    f"(<{latest_release.html_url}>). New releases will be posted from now on."
+                    f"Latest release: [{newest.name or newest.tag_name}]"
+                    f"(<{newest.html_url}>). New releases will be posted from now on."
                 )
             else:
                 lines.append("This repo has no releases yet.")
@@ -279,10 +280,13 @@ class SubscriptionsCog(
             verb = "doesn't" if len(missing) == 1 else "don't"
             raise UserError(f"{noun} {listed} {verb} exist in **{gh_repo.full_name}**.")
 
-    async def _baseline(self, keys: list[WatchKey], gh_repo: Repository) -> Release | None:
+    async def _baseline(
+        self, keys: list[WatchKey], gh_repo: Repository, *, preview: bool
+    ) -> Release | None:
         """Baseline new watches so subscribers aren't flooded with old items.
 
-        Returns the latest published release, if releases are watched, for the preview.
+        With `preview`, returns the latest published release for the reply (looking it up if
+        baselining didn't already fetch the releases).
         """
         latest: Release | None = None
         for key in keys:
@@ -295,7 +299,7 @@ class SubscriptionsCog(
                 except GitHubError:
                     # The poller baselines any watch that still lacks a watermark.
                     logfire.warn("baseline failed for {repo}", repo=gh_repo.full_name)
-            if key.kind == Kind.RELEASE:
+            if key.kind == Kind.RELEASE and preview:
                 if items is None:
                     try:
                         items = (await self.bot.github.list_releases(gh_repo.full_name)).items

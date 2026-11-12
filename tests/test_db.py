@@ -646,10 +646,11 @@ def command_cog(sessions, config: Settings, *repos: Repository) -> Subscriptions
     async def get_repo(full_name: str) -> Repository:
         return by_name[full_name.lower()]
 
+    no_releases = AsyncMock(return_value=Conditional(items=[], etag=None))
     bot = SimpleNamespace(
         settings=config,
         sessions=sessions,
-        github=SimpleNamespace(get_repo=get_repo),
+        github=SimpleNamespace(get_repo=get_repo, list_releases=no_releases),
         guild_settings=GuildSettingsCache(config, sessions),
         poller=SimpleNamespace(baseline=AsyncMock(return_value=[])),
     )
@@ -738,6 +739,23 @@ async def test_list_hides_channels_the_member_cannot_view(sessions):
     assert "no subscriptions that you can see" in await listed(member, channel=staff_channel)
     # Managers see everything.
     assert "<#2>" in await listed(member_of(9, manager=True))
+
+
+async def test_subscribe_only_looks_up_releases_for_a_preview_it_shows(sessions):
+    cog = command_cog(sessions, settings(), gh_repo())
+    alice, lookups = member_of(1), cog.bot.github.list_releases
+    await cog.subscribe.callback(cog, interaction_in(cog, alice), "octo/widget")
+    async with sessions.begin() as s:  # the watch is baselined, as the poller would do
+        await s.execute(update(RepoWatch).values(last_seen_id=""))
+
+    # Adding tags to it shows no release preview, so no release lookup either.
+    await cog.subscribe.callback(cog, interaction_in(cog, alice), "octo/widget", tags=True)
+    lookups.assert_not_awaited()
+    # Subscribing another channel does show the preview.
+    other = interaction_in(cog, alice, channel_id=7)
+    await cog.subscribe.callback(cog, other, "octo/widget")
+    lookups.assert_awaited_once()
+    assert "no releases yet" in other.followup.send.await_args.args[0]
 
 
 async def test_unsubscribe_needs_the_creator_or_a_manager(sessions):
