@@ -104,7 +104,7 @@ CREATE TABLE repo_watches (
     kind           TEXT   NOT NULL,           -- 'release' | 'tag' | 'commit'
     branch         TEXT   NOT NULL DEFAULT '', -- concrete branch name for 'commit'; '' otherwise
     etag           TEXT,
-    last_seen_id   TEXT,                       -- watermark: newest release's published_at, tag name, or commit SHA
+    last_seen_id   TEXT,                       -- watermark: newest release's published_at, JSON list of tag names, or commit SHA
     poll_interval  INTERVAL NOT NULL DEFAULT '10 minutes',
     next_poll_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_polled_at TIMESTAMPTZ,                -- shown by /repodrop status
@@ -244,8 +244,8 @@ When a guild removes the bot, nothing is deleted right away: its `guild_settings
 
 **Endpoints by kind:**
 
-- Releases use `GET /repos/{o}/{r}/releases?per_page=10`, skipping drafts and skipping prereleases unless the subscription opts in. Each new release's payload records the tag of the next-older release in the same response as `previous_tag`, for the Compare button (§8.4).
-- Tags use `GET /repos/{o}/{r}/tags?per_page=10`. Each new tag's payload records the next tag in the same response as `previous_tag`, for the Compare button.
+- Releases use `GET /repos/{o}/{r}/releases?per_page=100`, skipping drafts and skipping prereleases unless the subscription opts in. Each new release's payload records the tag of the next-older release in the same response as `previous_tag`, for the Compare button (§8.4).
+- Tags use `GET /repos/{o}/{r}/tags?per_page=100`. GitHub lists tags by version name, not by date, so the watermark is the set of names on that page and a tag is new when its name isn't in the set. Each new tag's payload records the next tag in the same response as `previous_tag`, for the Compare button.
 - Commits use `GET /repos/{o}/{r}/commits?sha={branch}&per_page=20`, polled separately for each watched branch. All new commits on one branch from one poll become a single batched event whose payload includes the branch name, with `external_id` set to `{branch}:{before_sha}..{after_sha}`.
 
 **Multiple branches:**

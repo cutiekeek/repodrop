@@ -81,7 +81,7 @@ def test_release_payload_carries_previous_tag_and_no_assets():
 
 
 def test_tag_payload_previous_tag():
-    d = detect_tags(REPO, [tag("v3"), tag("v2"), tag("v1")], "v1")
+    d = detect_tags(REPO, [tag("v3"), tag("v2"), tag("v1")], '["v1"]')
     assert [(e.external_id, e.payload["previous_tag"]) for e in d.events] == [
         ("v2", "v1"),
         ("v3", "v2"),

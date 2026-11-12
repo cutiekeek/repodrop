@@ -6,17 +6,19 @@ Pure functions: given the latest items from GitHub and the stored watermark
 Watermarks per kind:
 - release: `published_at` (ISO 8601, UTC) of the newest published release. Using the publish
   time rather than the release ID means drafts that get published later are still caught.
-- tag: the name of the first tag GitHub returns.
+- tag: a JSON list of the tag names on the first page GitHub returns.
 - commit: the SHA of the branch head.
 
 An empty-string watermark means "baselined, but there was nothing yet". `None` means the
 watch has never been baselined, and callers must baseline instead of detecting.
 """
 
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from repodrop.github.client import TAGS_PER_PAGE
 from repodrop.github.schemas import Commit, Release, Tag
 
 MAX_BODY_CHARS = 6000
@@ -138,31 +140,45 @@ def release_payload(
 
 
 def baseline_tags(tags: list[Tag]) -> str:
-    return tags[0].name if tags else ""
+    return json.dumps([t.name for t in tags])
 
 
 def detect_tags(repo: RepoRef, tags: list[Tag], last_seen: str) -> Detection:
-    if not tags or tags[0].name == last_seen:
-        return Detection(watermark=last_seen)
+    """A tag is new when its name isn't in the stored set.
 
-    names = [t.name for t in tags]
-    if not last_seen:
-        new = tags  # first tags ever pushed
-    elif last_seen in names:
-        new = tags[: names.index(last_seen)]
-    else:
-        # The watermark tag was deleted or pushed off the page; only announce the newest one
-        # rather than risk re-announcing old tags. Events are deduped by tag name regardless.
-        new = tags[:1]
+    GitHub lists tags by version name, not by date, so a new tag can appear anywhere on the
+    page (a v24 patch below the v26 line), not only at the top.
+    """
+    # shortcut: only the first page (TAGS_PER_PAGE names, highest versions first) is watched,
+    # so a new tag sorting below it is missed; page through all tags if that ever matters.
+    if not tags:
+        return Detection(watermark=last_seen)
+    watermark = baseline_tags(tags)
+    if last_seen and not last_seen.startswith("["):
+        # Stored before name sets were kept (one tag name, which can't start with "["):
+        # baseline again rather than announce the whole page.
+        return Detection(watermark=watermark)
+
+    seen = set(json.loads(last_seen)) if last_seen else set()
+    known = [i for i, t in enumerate(tags) if t.name in seen]
+    new = [i for i, t in enumerate(tags) if t.name not in seen]
+    if seen and not known:
+        # Nothing we knew is left on the page (tags rewritten, or a page of new ones): announce
+        # only the first rather than flood the channel.
+        new = new[:1]
+    elif known and len(tags) >= TAGS_PER_PAGE:
+        # On a full page, unknown names below the last known one are old tags that moved up
+        # after a tag above them was deleted.
+        new = [i for i in new if i < known[-1]]
 
     return Detection(
-        watermark=tags[0].name,
+        watermark=watermark,
         events=[
             DetectedEvent(
-                external_id=t.name,
-                payload=tag_payload(repo, t, previous_tag=_next_name(tags, i)),
+                external_id=tags[i].name,
+                payload=tag_payload(repo, tags[i], previous_tag=_next_name(tags, i)),
             )
-            for i, t in reversed(list(enumerate(new)))
+            for i in reversed(new)
         ],
     )
 

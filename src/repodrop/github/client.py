@@ -19,6 +19,9 @@ from repodrop.github.schemas import (
 )
 
 API_URL = "https://api.github.com"
+# GitHub's maximum page size. Anything beyond one page between two polls is never seen.
+RELEASES_PER_PAGE = 100
+TAGS_PER_PAGE = 100
 
 
 class GitHubError(Exception):
@@ -108,14 +111,14 @@ class GitHubClient:
     # ------------------------------------------------------------------ polled lists
 
     async def list_releases(
-        self, full_name: str, *, etag: str | None = None, per_page: int = 10
+        self, full_name: str, *, etag: str | None = None, per_page: int = RELEASES_PER_PAGE
     ) -> Conditional[list[Release]]:
         return await self._conditional(
             f"/repos/{full_name}/releases", releases_adapter, etag, {"per_page": per_page}
         )
 
     async def list_tags(
-        self, full_name: str, *, etag: str | None = None, per_page: int = 10
+        self, full_name: str, *, etag: str | None = None, per_page: int = TAGS_PER_PAGE
     ) -> Conditional[list[Tag]]:
         return await self._conditional(
             f"/repos/{full_name}/tags", tags_adapter, etag, {"per_page": per_page}

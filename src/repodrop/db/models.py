@@ -60,7 +60,8 @@ class RepoWatch(Base):
     kind: Mapped[str] = mapped_column(Text, primary_key=True)
     branch: Mapped[str] = mapped_column(Text, primary_key=True, server_default="")  # 'commit' only
     etag: Mapped[str | None] = mapped_column(Text)
-    # Detection watermark: newest release's published_at, newest tag name, or head commit SHA.
+    # Detection watermark: newest release's published_at, JSON list of the tag names on the
+    # first page, or head commit SHA.
     # NULL means the watch has not been baselined yet.
     last_seen_id: Mapped[str | None] = mapped_column(Text)
     poll_interval: Mapped[timedelta] = mapped_column(Interval, server_default=text("'10 minutes'"))

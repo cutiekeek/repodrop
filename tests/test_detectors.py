@@ -1,5 +1,7 @@
+import json
 from datetime import UTC, datetime, timedelta
 
+from repodrop.github.client import TAGS_PER_PAGE
 from repodrop.github.schemas import Commit, Release, Tag
 from repodrop.poller.detectors import (
     RepoRef,
@@ -97,30 +99,67 @@ def test_detect_releases_from_empty_baseline():
 # --------------------------------------------------------------------------- tags
 
 
+def tags(*names: str) -> list[Tag]:
+    return [tag(n) for n in names]
+
+
+def seen(*names: str) -> str:
+    return baseline_tags(tags(*names))
+
+
 def test_baseline_tags():
-    assert baseline_tags([tag("v2"), tag("v1")]) == "v2"
-    assert baseline_tags([]) == ""
+    assert json.loads(baseline_tags(tags("v2", "v1"))) == ["v2", "v1"]
+    assert json.loads(baseline_tags([])) == []
 
 
-def test_detect_tags_new_above_watermark():
-    d = detect_tags(REPO, [tag("v3"), tag("v2"), tag("v1")], "v1")
+def test_detect_tags_new_at_the_top():
+    d = detect_tags(REPO, tags("v3", "v2", "v1"), seen("v1"))
     assert [e.external_id for e in d.events] == ["v2", "v3"]
-    assert d.watermark == "v3"
+    assert d.watermark == seen("v3", "v2", "v1")
+
+
+def test_detect_tags_new_below_the_top():
+    # GitHub lists by version name: a v24 patch lands under the v26 line, not first.
+    d = detect_tags(
+        REPO, tags("v27.0.0", "v26.1.0", "v24.2.1", "v24.2.0"), seen("v27.0.0", "v24.2.0")
+    )
+    assert [e.external_id for e in d.events] == ["v24.2.1", "v26.1.0"]
+    assert d.events[0].payload["previous_tag"] == "v24.2.0"
 
 
 def test_detect_tags_unchanged():
-    d = detect_tags(REPO, [tag("v1")], "v1")
-    assert d.events == [] and d.watermark == "v1"
+    d = detect_tags(REPO, tags("v1"), seen("v1"))
+    assert d.events == [] and d.watermark == seen("v1")
 
 
-def test_detect_tags_missing_watermark_only_announces_newest():
-    d = detect_tags(REPO, [tag("v9"), tag("v8")], "v1")
+def test_detect_tags_first_tags_ever():
+    for empty in ("", seen()):
+        d = detect_tags(REPO, tags("v2", "v1"), empty)
+        assert [e.external_id for e in d.events] == ["v1", "v2"]
+
+
+def test_detect_tags_nothing_known_only_announces_first():
+    d = detect_tags(REPO, tags("v9", "v8"), seen("v1"))
     assert [e.external_id for e in d.events] == ["v9"]
 
 
+def test_detect_tags_old_single_name_watermark_baselines_again():
+    d = detect_tags(REPO, tags("v3", "v2", "v1"), "v1")
+    assert d.events == [] and d.watermark == seen("v3", "v2", "v1")
+
+
+def test_detect_tags_full_page_ignores_old_tags_that_moved_up():
+    page = [f"v{n}" for n in range(TAGS_PER_PAGE, 0, -1)]  # v100 .. v1
+    # v50 and v40 were deleted, so the old v0 moved onto the page; v101 is really new.
+    now = ["v101", *[n for n in page if n not in ("v50", "v40")], "v0"]
+    assert len(now) == TAGS_PER_PAGE
+    d = detect_tags(REPO, tags(*now), seen(*page))
+    assert [e.external_id for e in d.events] == ["v101"]
+
+
 def test_detect_tags_empty_list_keeps_watermark():
-    d = detect_tags(REPO, [], "v1")
-    assert d.events == [] and d.watermark == "v1"
+    d = detect_tags(REPO, [], seen("v1"))
+    assert d.events == [] and d.watermark == seen("v1")
 
 
 # --------------------------------------------------------------------------- commits
