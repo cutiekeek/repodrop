@@ -6,16 +6,19 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from sqlalchemy import select, text, update
 
 from repodrop.announcer.dispatcher import Dispatcher
 from repodrop.bot.cogs.subscriptions import SubscriptionsCog
+from repodrop.bot.errors import UserError
 from repodrop.config import Settings
 from repodrop.db import queries
 from repodrop.db.models import Delivery, Event, Repo, RepoWatch, Subscription
 from repodrop.db.queries import WatchKey
 from repodrop.github.client import Conditional, NotFoundError, RateLimit
 from repodrop.github.schemas import Release, Repository
+from repodrop.guild_settings import GuildSettingsCache
 from repodrop.poller.scheduler import Poller
 
 GUILD, CHANNEL, USER = 111, 222, 333
@@ -534,6 +537,102 @@ async def test_metadata_refresh_follows_default_branch_change(sessions):
         assert trunk.last_seen_id is None  # baselined on its first poll, so no history flood
 
 
+# --------------------------------------------------------------------------- /repodrop commands
+
+
+def member_of(user_id: int, *, manager: bool = False) -> discord.Member:
+    member = MagicMock(spec=discord.Member)
+    member.id, member.roles = user_id, []
+    member.guild_permissions = discord.Permissions(manage_guild=manager)
+    return member
+
+
+def command_cog(sessions, config: Settings, *repos: Repository) -> SubscriptionsCog:
+    """The real cog on a fake bot whose GitHub knows `repos` by name."""
+    by_name = {r.full_name.lower(): r for r in repos}
+
+    async def get_repo(full_name: str) -> Repository:
+        return by_name[full_name.lower()]
+
+    bot = SimpleNamespace(
+        settings=config,
+        sessions=sessions,
+        github=SimpleNamespace(get_repo=get_repo),
+        guild_settings=GuildSettingsCache(config, sessions),
+        poller=SimpleNamespace(baseline=AsyncMock(return_value=[])),
+    )
+    return SubscriptionsCog(bot)
+
+
+def interaction_in(cog: SubscriptionsCog, member, *, channel_id=CHANNEL, guild_id=GUILD):
+    """A command run by `member` in a channel where everyone, the bot included, may post."""
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id, channel.mention = channel_id, f"<#{channel_id}>"
+    channel.permissions_for.return_value = discord.Permissions.all()
+    return SimpleNamespace(
+        guild=SimpleNamespace(id=guild_id),
+        guild_id=guild_id,
+        user=member,
+        channel=channel,
+        client=cog.bot,
+        response=SimpleNamespace(defer=AsyncMock(), send_message=AsyncMock()),
+        followup=SimpleNamespace(send=AsyncMock()),
+    )
+
+
+async def test_subscribe_creates_updates_and_enforces_creator_and_caps(sessions):
+    gadget = gh_repo(full_name="octo/gadget").model_copy(update={"id": 43})
+    cog = command_cog(sessions, settings(max_repos_per_guild=1), gh_repo(), gadget)
+    alice, bob = member_of(1), member_of(2)
+
+    async def subscribe(member, repo="octo/widget", **options) -> str:
+        interaction = interaction_in(cog, member)
+        await cog.subscribe.callback(cog, interaction, repo, **options)
+        return interaction.followup.send.await_args.args[0]
+
+    assert f"Subscribed <#{CHANNEL}>" in await subscribe(alice)
+    # Running it again changes only what's passed.
+    assert "Added tags" in await subscribe(alice, tags=True)
+    # Another member can't change her subscription...
+    with pytest.raises(UserError, match="Only <@1>"):
+        await subscribe(bob, commits=True)
+    # ...or take the server past its repo cap with a second repo.
+    with pytest.raises(UserError, match="limit 1"):
+        await subscribe(bob, repo="octo/gadget")
+
+    async with sessions() as s:
+        [(sub, _)] = await queries.list_subscriptions(s, GUILD)
+        assert (sub.kinds, sub.created_by, sub.channel_id) == (["release", "tag"], 1, CHANNEL)
+        assert {w.kind for w in await s.scalars(select(RepoWatch))} == {"release", "tag"}
+        assert [r.full_name for r in await s.scalars(select(Repo))] == ["octo/widget"]
+
+
+async def test_unsubscribe_needs_the_creator_or_a_manager(sessions):
+    async with sessions.begin() as s:
+        repo, _ = await make_sub(s)  # created by USER
+        await queries.ensure_watch(s, WatchKey(repo.id, "release", ""), initial_interval=TEN_MIN)
+    cog = command_cog(sessions, settings())
+
+    async def unsubscribe(member, repo="octo/widget") -> str:
+        interaction = interaction_in(cog, member)
+        await cog.unsubscribe.callback(cog, interaction, repo)
+        return interaction.response.send_message.await_args.args[0]
+
+    with pytest.raises(UserError, match="isn't subscribed"):
+        await unsubscribe(member_of(USER), repo="octo/other")
+    with pytest.raises(UserError, match=f"Only <@{USER}>"):
+        await unsubscribe(member_of(2))
+    async with sessions() as s:
+        assert await queries.count_guild_subscriptions(s, GUILD) == 1
+
+    # A manager can remove someone else's; the unused watch and repo go with it.
+    manager = member_of(3, manager=True)
+    assert "Unsubscribed" in await unsubscribe(manager, repo="https://github.com/Octo/Widget")
+    async with sessions() as s:
+        for model in (Subscription, RepoWatch, Repo):
+            assert (await s.scalars(select(model))).all() == [], model.__name__
+
+
 async def test_subscribe_moves_default_followers_when_default_branch_changed(sessions):
     # One server follows the default branch (main) for commits.
     async with sessions.begin() as s:
@@ -542,32 +641,10 @@ async def test_subscribe_moves_default_followers_when_default_branch_changed(ses
 
     # The default branch becomes trunk. Before the daily metadata check sees it, another
     # server subscribes to the repo, which stores the new default branch.
-    from repodrop.guild_settings import GuildSettingsCache
-
-    config = settings()
-    bot = SimpleNamespace(
-        settings=config,
-        sessions=sessions,
-        github=SimpleNamespace(get_repo=AsyncMock(return_value=gh_repo(default_branch="trunk"))),
-        guild_settings=GuildSettingsCache(config, sessions),
-        poller=SimpleNamespace(baseline=AsyncMock(return_value=[])),
+    cog = command_cog(sessions, settings(), gh_repo(default_branch="trunk"))
+    interaction = interaction_in(
+        cog, member_of(999, manager=True), channel_id=555, guild_id=GUILD + 1
     )
-    member = MagicMock(spec=discord.Member)
-    member.id, member.roles = 999, []
-    member.guild_permissions = discord.Permissions(manage_guild=True)
-    channel = MagicMock(spec=discord.TextChannel)
-    channel.id = 555
-    channel.permissions_for.return_value = discord.Permissions.all()
-    interaction = SimpleNamespace(
-        guild=SimpleNamespace(id=GUILD + 1),
-        guild_id=GUILD + 1,
-        user=member,
-        channel=channel,
-        client=bot,
-        response=SimpleNamespace(defer=AsyncMock()),
-        followup=SimpleNamespace(send=AsyncMock()),
-    )
-    cog = SubscriptionsCog(bot)
     await cog.subscribe.callback(cog, interaction, "octo/widget")
     interaction.followup.send.assert_awaited_once()
 
