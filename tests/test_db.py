@@ -335,7 +335,7 @@ async def test_poller_baseline_detect_and_not_modified(sessions):
     assert gh.seen_etags[-1] == '"1"'
     assert not wake.is_set()
     async with sessions() as s:
-        assert (await queries.get_watch(s, key)).poll_interval == timedelta(minutes=15)
+        assert (await queries.get_watch(s, key)).poll_interval == timedelta(seconds=90)
 
     # Two new releases (one a prerelease the subscription didn't opt into).
     gh.releases = [
@@ -356,7 +356,7 @@ async def test_poller_baseline_detect_and_not_modified(sessions):
         watch = await queries.get_watch(s, key)
         assert watch.last_seen_id == (t0 + timedelta(hours=2)).isoformat()
         assert watch.etag == '"2"'
-        assert watch.poll_interval == timedelta(minutes=5)  # changed: poll faster
+        assert watch.poll_interval == timedelta(minutes=1)  # changed: back to the minimum
 
 
 async def due_watch(sessions, key: WatchKey, last_seen="x") -> None:

@@ -259,7 +259,7 @@ When a guild removes the bot, nothing is deleted right away: its `guild_settings
 
 **Missing repos:** a `404` means the repo was deleted or made private. The poller records it in `last_error` and auto-disables every subscription to that repo with a reason (see §8.6 for how admins are told). Once every subscription is disabled, the cleanup task removes the repo's watches, so polling stops; if the repo comes back, re-running `/repodrop subscribe` reactivates it.
 
-**Adaptive intervals:** repos that recently changed are polled more often (around 5 minutes), and quiet repos back off gradually (up to about 60 minutes).
+**Adaptive intervals:** repos that recently changed are polled more often (every minute), and quiet repos back off gradually (each poll with nothing new multiplies the interval by 1.5, up to 30 minutes).
 
 ### 8.3 Announce
 
@@ -376,7 +376,7 @@ Members can remove subscriptions they created (matched on `created_by`), and man
 | `/repodrop subscribe` | `repo` (owner/name or URL), `channel` (default: server default, then current), `releases` / `tags` / `commits` (bool), `branches` (comma-separated or `default`), `prereleases` (bool) | Creates a subscription, or updates the existing one for that repo and channel (§8.1). Everyone by default, or the subscriber role if set; managers always. Updates are limited to the creator and managers. |
 | `/repodrop unsubscribe` | `repo` (autocomplete: the member's own subscriptions, or all of them for managers), `channel` | Removes the subscription. Members can remove their own; managers can remove any. |
 | `/repodrop list` | `channel` (optional) | Lists the server's or channel's subscriptions. |
-| `/repodrop test` | `repo` | Posts the latest release to check formatting and permissions. Managers only. |
+| `/repodrop test` | `repo` | Posts the latest release, or the newest tag if there are no releases, to check formatting and permissions. Commits aren't covered. Managers only. |
 | `/repodrop latest` | `repo` (autocomplete), `public` (bool) | Shows a repo's newest release with buttons, no subscription needed (§8.5). Everyone by default; can be limited to managers. |
 | `/repodrop status` | `channel` (optional) | Health report for the server's subscriptions (§8.6). Managers only. |
 | `/repodrop settings` | none | Opens the settings panel (§8.7). Managers only; changing the manager role requires Manage Server. |

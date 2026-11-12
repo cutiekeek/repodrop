@@ -515,7 +515,7 @@ class SubscriptionsCog(
     # ------------------------------------------------------------------ /repodrop test
 
     @app_commands.command(
-        description="Post a repo's latest release to check formatting and permissions"
+        description="Post a repo's latest release (or tag) to check formatting and permissions"
     )
     @app_commands.describe(
         repo="owner/name or a github.com URL", channel="Where to post (default: this channel)"
@@ -530,19 +530,9 @@ class SubscriptionsCog(
         await interaction.response.defer(ephemeral=True, thinking=True)
         target = self._target_channel(interaction, channel)
         self._check_bot_permissions(target)
-        gh_repo = await self._resolve_repo(repo)
-        releases = await self._github_call(self.bot.github.list_releases(gh_repo.full_name))
-        items = releases.items or []
-        release = _latest_release(items)
-        if release is None:
-            raise UserError(f"**{gh_repo.full_name}** has no published releases to test with.")
-
-        payload = release_payload(
-            RepoRef(gh_repo.full_name),
-            release,
-            previous_tag=previous_release_tag(release, items),
-        )
-        embed, view = build_message("release", payload, await self._presentation(interaction))
+        # Same lookup as /repodrop latest: the newest stable release, else the newest tag.
+        kind, payload = await self._latest_payload(repo)
+        embed, view = build_message(kind, payload, await self._presentation(interaction))
         try:
             await target.send(
                 embed=embed, allowed_mentions=discord.AllowedMentions.none(), **_view_kw(view)
@@ -554,7 +544,7 @@ class SubscriptionsCog(
             guild_id=target.guild.id,
             channel_id=target.id,
             user_id=interaction.user.id,
-            repo=gh_repo.full_name,
+            repo=payload["repo"]["full_name"],
         )
         await interaction.followup.send(
             f"Posted a test announcement in {target.mention}.", ephemeral=True

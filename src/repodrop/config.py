@@ -55,9 +55,11 @@ class Settings(DatabaseSettings):
     guild_settings_cache_ttl: timedelta = timedelta(seconds=60)
 
     # Durations accept seconds ("300") or ISO 8601 ("PT5M").
-    poll_min_interval: timedelta = timedelta(minutes=5)
-    poll_default_interval: timedelta = timedelta(minutes=10)
-    poll_max_interval: timedelta = timedelta(minutes=60)
+    # A watch starts at the default; each poll with nothing new multiplies the interval by 1.5
+    # up to the max, and a poll that finds something drops it back to the min.
+    poll_min_interval: timedelta = timedelta(minutes=1)
+    poll_default_interval: timedelta = timedelta(minutes=1)
+    poll_max_interval: timedelta = timedelta(minutes=30)
     poll_concurrency: int = 8
     poll_batch_size: int = 50
     poll_tick: timedelta = timedelta(seconds=15)

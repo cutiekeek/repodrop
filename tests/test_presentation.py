@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import pytest
@@ -258,6 +258,18 @@ async def test_latest_managers_only_setting():
         await cog.latest.callback(cog, interaction_for(locked, manager=False), "octo/widget")
     interaction = interaction_for(locked, manager=True)
     await cog.latest.callback(cog, interaction, "octo/widget")
+    interaction.followup.send.assert_awaited_once()
+
+
+async def test_test_command_posts_newest_tag_when_there_are_no_releases():
+    cog = cog_with(FakeGitHub(tags=[tag("v9"), tag("v8")]))
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id, channel.guild.id = 7, 1
+    channel.permissions_for.return_value = discord.Permissions.all()
+    channel.send = AsyncMock()
+    interaction = interaction_for(settings(), manager=True)
+    await cog.test.callback(cog, interaction, "octo/widget", channel)
+    assert channel.send.await_args.kwargs["embed"].title == "New tag v9"
     interaction.followup.send.assert_awaited_once()
 
 
