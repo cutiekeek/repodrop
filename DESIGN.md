@@ -430,7 +430,7 @@ Members can remove subscriptions they created (matched on `created_by`), and man
 
 - Call `logfire.configure(service_name="repodrop")` at startup.
 - Call `logfire.instrument_httpx()` so every GitHub request gets a span with status and latency.
-- Call `logfire.instrument_asyncpg()` or `logfire.instrument_sqlalchemy()` for query spans.
+- Call `logfire.instrument_asyncpg()` for query spans.
 - Route discord.py's stdlib logging into Logfire with `logfire.LogfireLoggingHandler`.
 - Add custom spans:
   - `poll_cycle`, with the count of due watches.

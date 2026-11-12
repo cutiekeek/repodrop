@@ -58,10 +58,6 @@ def build_message(
     return embed, link_view(buttons)
 
 
-def build_embed(kind: str, payload: dict[str, Any]) -> discord.Embed:
-    return build_message(kind, payload)[0]
-
-
 # --------------------------------------------------------------------------- releases
 
 
