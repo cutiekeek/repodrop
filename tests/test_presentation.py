@@ -1,5 +1,6 @@
 """Phase 4: Compare data, link buttons, embed styles, and /repodrop latest."""
 
+import time
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -16,7 +17,7 @@ from repodrop.announcer.embeds import (
     tag_buttons,
 )
 from repodrop.bot.checks import AccessDenied
-from repodrop.bot.cogs.subscriptions import SubscriptionsCog, UserError
+from repodrop.bot.cogs.subscriptions import LATEST_CACHE_TTL, SubscriptionsCog, UserError
 from repodrop.config import Settings
 from repodrop.github.client import Conditional
 from repodrop.github.schemas import Release, Repository, Tag
@@ -220,6 +221,11 @@ async def test_latest_prefers_newest_stable_release_and_caches():
     calls = gh.calls
     assert await cog._latest_payload("https://github.com/OCTO/widget") == (kind, payload)
     assert gh.calls == calls  # served from the cache
+
+    # Storing a result drops entries that have expired, so the cache can't only grow.
+    cog._latest_cache = {"old/repo": (time.monotonic() - LATEST_CACHE_TTL - 1, kind, payload)}
+    await cog._latest_payload("octo/widget")
+    assert set(cog._latest_cache) == {"octo/widget"}
 
 
 async def test_latest_falls_back_to_newest_tag():

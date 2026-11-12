@@ -489,7 +489,12 @@ class SubscriptionsCog(
             payload = tag_payload(
                 ref, tag_items[0], previous_tag=tag_items[1].name if len(tag_items) > 1 else None
             )
-        self._latest_cache[cache_key] = (time.monotonic(), kind, payload)
+        now = time.monotonic()
+        # Drop expired entries while storing, so the cache can't grow without bound.
+        self._latest_cache = {
+            k: v for k, v in self._latest_cache.items() if now - v[0] < LATEST_CACHE_TTL
+        }
+        self._latest_cache[cache_key] = (now, kind, payload)
         return kind, payload
 
     # ------------------------------------------------------------------ /repodrop settings
